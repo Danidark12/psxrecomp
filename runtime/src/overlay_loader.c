@@ -615,6 +615,21 @@ int psx_overlay_static_code_matches(const uint32_t *lo_len_pairs,
         return entry->matches;
     }
 
+    /* Arm the page watch over this variant's code ranges before hashing them.
+     * Without this the static path has NO residency signal: overlay_page_gen
+     * only advances for pages set in overlay_watch_bitmap, and the sole other
+     * callers of overlay_watch_set_range are the DLL loader's cand_register()
+     * and rebuild_lazy_manifest_index() -- both inert for an AOT-static title.
+     * An unwatched range yields a constant gen_sum, so the cache above would
+     * answer every subsequent dispatch from its first result: the CRC gate
+     * would be consulted once per process instead of once per code change, and
+     * a band that swapped occupants would keep dispatching the stale variant.
+     * Arming only sets bitmap bits -- it does not advance any generation, so
+     * the gen_sum computed above stays valid for the cache write below. */
+    for (uint32_t i = 0; i < count; i++)
+        overlay_watch_set_range(lo_len_pairs[i * 2u] & 0x1FFFFFFFu,
+                                lo_len_pairs[i * 2u + 1u]);
+
     uint32_t crc = 0xFFFFFFFFu;
     for (uint32_t i = 0; i < count; i++) {
         uint32_t lo = lo_len_pairs[i * 2u] & 0x1FFFFFFFu;
@@ -2245,6 +2260,12 @@ static void init_callbacks(void) {
     s_callbacks.psx_restore_state_escape = psx_restore_state_escape;
     /* Return-from-exception mark (ABI v12): overlay `rfe` ops forward here. */
     s_callbacks.rfe_mark_escape          = psx_rfe_mark_escape;
+    /* Stale-static guard (ABI v22): defined by the generated dispatch shard in
+     * this executable, so overlay DLLs forward here rather than link it. */
+    {
+        extern int psx_game_text_native_ok(uint32_t addr);
+        s_callbacks.game_text_native_ok  = psx_game_text_native_ok;
+    }
     /* Call-contract state (ABI v2): DLL code shares the runtime's bail
      * flag and counters through these pointers. */
     s_callbacks.call_bail_flag = &g_psx_call_bail;

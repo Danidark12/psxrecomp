@@ -488,6 +488,13 @@ struct RuntimeConfig {
     // PSX_SCREEN env var overrides this at runtime (debug path).
     int                   video_screen_kind = 0;
 
+    // scanlines: present-time horizontal scanline darkening (host enhancement,
+    // orthogonal to crt_filter's colour LUT — the two compose). Off by default;
+    // scanline_strength 0..1 is the dark-gap depth. PSX_SCANLINES /
+    // PSX_SCANLINE_STRENGTH override at runtime (debug path).
+    bool                  video_scanlines = false;
+    double                video_scanline_strength = 0.5;
+
     // auto_skip_fmv: when true, full-motion videos (streaming XA audio + MDEC
     // video) are skipped the instant they're detected — presentation + pacing are
     // suppressed and audio muted for the duration, so an FMV ends in a fraction of
@@ -1196,6 +1203,10 @@ struct UserSettings {
     bool has_geometry_correction   = false; bool geometry_correction   = false;
     bool has_perspective_texturing = false; bool perspective_texturing = false;
     bool has_screen_kind    = false; int  screen_kind    = 0; // 0..3 (ScreenKind)
+    // Scanline post-process (see RuntimeConfig::video_scanlines). Strength stored
+    // 0..1; the launcher ABI carries it as an integer percent.
+    bool has_scanlines         = false; bool   scanlines         = false;
+    bool has_scanline_strength = false; double scanline_strength = 0.5;
     bool has_auto_skip_fmv  = false; bool auto_skip_fmv  = false; // skip FMVs
     // [video] turbo_loads: DEPRECATED AND IGNORED — the legacy home of the
     // generic Turbo loads switch, back when the launcher drew a row for it.
@@ -1251,6 +1262,10 @@ struct UserSettings {
     // RECOMP_LAUNCHER_PAD_* encoding (0 = unbound, 1+button, 100+axis).
     bool has_hotkey_pad_rewind = false; int hotkey_pad_rewind = 1272; /* select+r3 */
     bool has_hotkey_pad_save_state_menu = false; int hotkey_pad_save_state_menu = 2040; /* select+r1 */
+    // fast_forward_pad: hold-to-fast-forward, the controller twin of the
+    // keyboard [KeyMap] Turbo (Tab). 0 = unbound.
+    bool has_hotkey_pad_fast_forward = false; int hotkey_pad_fast_forward = 1528; /* select+l1 */
+    bool has_hotkey_pad_fast_forward_toggle = false; int hotkey_pad_fast_forward_toggle = 0; /* unbound */
     // [audio]
     bool has_spu_hq         = false; bool spu_hq         = false;
     bool has_audio_freq     = false; int  audio_freq     = 44100;

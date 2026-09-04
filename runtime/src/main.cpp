@@ -1157,6 +1157,27 @@ static bool          g_video_aa    = true;  /* linear present filtering */
 /* FMV present reconstruction (VIDEO_FMV_FILTER_*), pushed to the GL renderer
  * once the config is resolved. Only consulted while g_video_aa is on. */
 static int           g_video_fmv_filter = PSXRecompV4::VIDEO_FMV_FILTER_DEFAULT;
+/* Scanline post-process (host display enhancement). Off by default; toggled by
+ * the launcher Display card, the PSX_SCANLINES env override, the F6 hotkey, or
+ * the `scanline` TCP command. Strength 0..1 is the dark-gap depth. Pushed to the
+ * GL renderer each present alongside the FMV filter. */
+static bool          g_video_scanlines = false;
+static float         g_video_scanline_strength = 0.5f;
+
+/* Single point that changes scanline state: keeps the g_video_* mirror (used by
+ * the hotkey and startup banner) in lockstep with the GL renderer, so the F6
+ * hotkey, the PSX_SCANLINES env override, and the `scanline` TCP command can be
+ * mixed without drifting. Declared extern "C" so debug_server.c can call it. */
+extern "C" void psx_video_set_scanlines(int on, float strength) {
+    g_video_scanlines = on ? true : false;
+    if (strength >= 0.f && strength <= 1.f) g_video_scanline_strength = strength;
+    gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
+                              g_video_scanline_strength);
+}
+extern "C" int psx_video_get_scanlines(float *strength) {
+    if (strength) *strength = g_video_scanline_strength;
+    return g_video_scanlines ? 1 : 0;
+}
 
 /* recomp-ui stores this 1-based so a zero-initialized (older) host reads as
  * "unset" rather than pinning nearest; the config enum is 0-based. Convert at
@@ -1196,6 +1217,8 @@ static int           g_rewind_depth  = 50;  /* local rewind snap count (50/100/1
 static int           g_rewind_interval = 15; /* frames between snaps (1/4/8/12/15) */
 static int           g_hotkey_pad_rewind = 1272;       /* select + r3 */
 static int           g_hotkey_pad_save_state_menu = 2040;/* select + r1 */
+static int           g_hotkey_pad_fast_forward = 1528;   /* select + l1 (hold) */
+static int           g_hotkey_pad_fast_forward_toggle = 0; /* unbound: latch fast-forward */
 static uint32_t      g_savestate_input_guard_min_until = 0;
 static uint32_t      g_savestate_input_guard_max_until = 0;
 static int           g_headless       = 0;   /* debug/CI frontend: no SDL window/audio */
@@ -1255,7 +1278,10 @@ static_assert((int)PSX_MOD_CONTROLLER_DIGITAL ==
               (int)PSXRecompV4::PAD_MODE_DIGITAL);
 static double        g_host_refresh_hz = 0.0;
 static constexpr double PSX_FRAME_PERIOD_MS = 1000.0 / 59.94;
+static double        g_guest_frame_period_ms = PSX_FRAME_PERIOD_MS;
 static double        g_frame_period_ms = PSX_FRAME_PERIOD_MS;
+static int           g_host_refresh_display_idx = -2;
+static uint64_t      g_host_refresh_last_probe_ms = 0;
 static bool          g_mod_native_vblank_rate = false;
 static uint32_t      g_mod_native_vblank_fps = 0;
 /* Activation-time request. -1 means no enabled mod owns load acceleration. */
@@ -1268,6 +1294,7 @@ static int present_vsync_owns_cadence(void);
 static int present_effective_swap_interval(void);
 static int present_should_wall_pace(void);
 static void apply_present_cadence(void);
+static void refresh_host_display_cadence(int force_log, int force_probe);
 
 /* Map the configured tri-state fullscreen mode (g_fullscreen) to the SDL
  * window-fullscreen flag: used both to open the window in that mode and to
@@ -1369,9 +1396,10 @@ extern "C" int psx_mod_set_native_vblank_rate(
     }
     g_mod_native_vblank_rate = true;
     g_mod_native_vblank_fps = frames_per_second;
-    g_frame_period_ms = frames_per_second
+    g_guest_frame_period_ms = frames_per_second
         ? 1000.0 / (double)frames_per_second
         : 0.0;
+    g_frame_period_ms = g_guest_frame_period_ms;
     /*
      * Above the physical panel rate (and in uncapped mode), swap-interval
      * blocking would silently replace the requested guest cadence with the
@@ -2809,10 +2837,64 @@ static void apply_netplay_local_viewport_aspect(bool netplay_enabled) {
  * guest resumes), which shows up as MotK FMV ~30–40 FPS in netplay vs ~50+
  * offline. Force immediate swaps for the session; restore on soft-exit. */
 static int host_refresh_matches_guest_cadence(void) {
-    if (g_host_refresh_hz <= 0.0 || g_frame_period_ms <= 0.0)
+    if (g_host_refresh_hz <= 0.0 || g_guest_frame_period_ms <= 0.0)
         return 0;
-    const double guest_hz = 1000.0 / g_frame_period_ms;
+    const double guest_hz = 1000.0 / g_guest_frame_period_ms;
     return std::fabs(g_host_refresh_hz - guest_hz) <= guest_hz * 0.02;
+}
+
+static void refresh_host_display_cadence(int force_log, int force_probe) {
+#ifndef PSX_SDL_NO_RENDER
+    if (!sdl_window)
+        return;
+
+    const uint64_t now_ms = SDL_GetTicks64();
+    const int disp_idx = SDL_GetWindowDisplayIndex(sdl_window);
+    if (!force_probe &&
+        disp_idx == g_host_refresh_display_idx &&
+        g_host_refresh_last_probe_ms != 0 &&
+        now_ms >= g_host_refresh_last_probe_ms &&
+        now_ms - g_host_refresh_last_probe_ms < 1000ull) {
+        return;
+    }
+    g_host_refresh_last_probe_ms = now_ms ? now_ms : 1ull;
+
+    double host_hz = 0.0;
+    if (disp_idx >= 0) {
+        SDL_DisplayMode dm;
+        if (SDL_GetCurrentDisplayMode(disp_idx, &dm) == 0 &&
+            dm.refresh_rate > 0) {
+            host_hz = (double)dm.refresh_rate;
+        }
+    }
+
+    const int display_changed = (disp_idx != g_host_refresh_display_idx);
+    const int refresh_changed =
+        std::fabs(host_hz - g_host_refresh_hz) > 0.05;
+    if (!force_log && !display_changed && !refresh_changed)
+        return;
+
+    g_host_refresh_display_idx = disp_idx;
+    g_host_refresh_hz = host_hz;
+    g_frame_period_ms = g_guest_frame_period_ms;
+    if (host_refresh_matches_guest_cadence()) {
+        g_frame_period_ms = 1000.0 / host_hz;
+        std::printf("psxrecomp: sync-to-host-refresh: pacing to %.1f Hz panel "
+                    "(%.4f ms/frame)\n", host_hz, g_frame_period_ms);
+    } else if (host_hz > 0.0) {
+        std::printf("psxrecomp: host panel %.1f Hz does not match guest "
+                    "cadence; keeping %.2f Hz pacing\n",
+                    host_hz,
+                    g_frame_period_ms > 0.0 ? 1000.0 / g_frame_period_ms : 0.0);
+    } else {
+        std::printf("psxrecomp: host refresh unknown; keeping %.2f Hz pacing\n",
+                    g_frame_period_ms > 0.0 ? 1000.0 / g_frame_period_ms : 0.0);
+    }
+    apply_present_cadence();
+#else
+    (void)force_log;
+    (void)force_probe;
+#endif
 }
 
 static int host_driver_vsync_unreliable(void) {
@@ -5888,6 +5970,8 @@ static void depth24_stage_scanout(const GpuDisplayInfo *di, uint32_t *buf,
 enum {
     PSX_ASSIST_BIND_REWIND = 0,
     PSX_ASSIST_BIND_SAVE_STATE_MENU,
+    PSX_ASSIST_BIND_FAST_FORWARD,   /* hold-to-fast-forward; pad twin of [KeyMap] Turbo */
+    PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE, /* press-to-latch; pad twin of [KeyMap] TurboToggle */
     PSX_ASSIST_BIND_COUNT
 };
 
@@ -5906,6 +5990,9 @@ enum {
 #define PSX_HOTKEY_PAD_SELECT_R1 \
     PSX_HOTKEY_PAD_BUTTON_COMBO(((uint32_t)1u << SDL_CONTROLLER_BUTTON_BACK) | \
                                 ((uint32_t)1u << SDL_CONTROLLER_BUTTON_RIGHTSHOULDER))
+#define PSX_HOTKEY_PAD_SELECT_L1 \
+    PSX_HOTKEY_PAD_BUTTON_COMBO(((uint32_t)1u << SDL_CONTROLLER_BUTTON_BACK) | \
+                                ((uint32_t)1u << SDL_CONTROLLER_BUTTON_LEFTSHOULDER))
 
 static int normalize_hotkey_pad_binding(int binding, int fallback) {
     if (PSX_HOTKEY_PAD_IS_BUTTON(binding)) {
@@ -6153,6 +6240,35 @@ static void savestate_menu_poll_toggle_buttons(void) {
     int down = hotkey_pad_binding_down(g_hotkey_pad_save_state_menu);
     if (down && !was_down && !psx_rewind_is_open())
         savestate_menu_toggle(0);
+    was_down = down;
+}
+
+/* Latched fast-forward: [KeyMap] TurboToggle (default F9) or the [hotkeys]
+ * fast_forward_toggle_pad shortcut flips this; while set, the manual
+ * fast-forward block runs exactly as if Turbo were held. Cleared by the next
+ * press, so a hold-to-run Turbo release never cancels a latched run. */
+static int g_manual_turbo_latched = 0;
+
+static void fast_forward_toggle_flip(void) {
+    char msg[40];
+    g_manual_turbo_latched = !g_manual_turbo_latched;
+    if (!g_manual_turbo_latched) {
+        host_osd_push("Fast forward: off", 900);
+        return;
+    }
+    const int mult = manual_fast_forward_multiplier();
+    if (mult < 0)
+        snprintf(msg, sizeof(msg), "Fast forward: max (locked)");
+    else
+        snprintf(msg, sizeof(msg), "Fast forward: %dx (locked)", mult);
+    host_osd_push(msg, 900);
+}
+
+static void fast_forward_toggle_poll_buttons(void) {
+    static int was_down;
+    int down = hotkey_pad_binding_down(g_hotkey_pad_fast_forward_toggle);
+    if (down && !was_down)
+        fast_forward_toggle_flip();
     was_down = down;
 }
 
@@ -6525,10 +6641,27 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                     host_osd_push("CD reinsert", 1500);
                 }
                 else if (!key_repeat &&
+                         host_keymap_match_event(HOST_KEYMAP_TURBO_TOGGLE,
+                                                 (int)key, (int)scancode,
+                                                 (int)mod)) {
+                    fast_forward_toggle_flip();
+                }
+                else if (!key_repeat &&
                          host_keymap_match_event(HOST_KEYMAP_DISPLAY_PERF,
                                                  (int)key, (int)scancode,
                                                  (int)mod)) {
                     fps_telemetry_toggle();
+                }
+                else if (!key_repeat &&
+                         host_keymap_match_event(HOST_KEYMAP_SCANLINES,
+                                                 (int)key, (int)scancode,
+                                                 (int)mod)) {
+                    psx_video_set_scanlines(g_video_scanlines ? 0 : 1,
+                                            g_video_scanline_strength);
+                    char msg[48];
+                    std::snprintf(msg, sizeof(msg), "Scanlines %s",
+                                  g_video_scanlines ? "on" : "off");
+                    host_osd_push(msg, 1200);
                 }
                 /* Host volume: config.ini [KeyMap] VolumeUp/VolumeDown
                  * (defaults: keypad +/-). 5% steps; shows right-side bar. */
@@ -6572,6 +6705,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         }
         savestate_menu_poll_toggle_buttons();
         rewind_poll_toggle_buttons();
+        fast_forward_toggle_poll_buttons();
         psx_rewind_note_frame();
         psx_rewind_present_tick((uint32_t)SDL_GetTicks());
         if (savestate_menu_open)
@@ -6746,6 +6880,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         return ep;
     }
 
+    refresh_host_display_cadence(0, 0);
+
     /* TCP turbo is for automated validation and trace capture. It keeps the
      * simulation advancing and the debug server polling, but removes frontend
      * presentation and wall-clock pacing. */
@@ -6766,12 +6902,20 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         const Uint8* keys = SDL_GetKeyboardState(NULL);
         static int turbo_skip = 0;
         static int turbo_was_down = 0;
-        if (host_hotkey_input_focused() &&
-            host_keymap_down(HOST_KEYMAP_TURBO, keys, (int)SDL_GetModState())) {
+        /* Keyboard ([KeyMap] Turbo, default Tab) or the controller host
+         * shortcut ([hotkeys] fast_forward_pad, default select+L1). Both are
+         * hold-to-run; the pad chord goes through the same combo matcher as
+         * Rewind / Save states so the launcher's binding editor covers it.
+         * g_manual_turbo_latched is the press-to-lock twin (TurboToggle /
+         * fast_forward_toggle_pad) and drives the same path. */
+        const bool kb_turbo = host_hotkey_input_focused() &&
+            host_keymap_down(HOST_KEYMAP_TURBO, keys, (int)SDL_GetModState());
+        if (kb_turbo || g_manual_turbo_latched ||
+            hotkey_pad_binding_down(g_hotkey_pad_fast_forward)) {
             const int mult = manual_fast_forward_multiplier();
             const int present_every = (mult < 0) ? 4 : (mult <= 4 ? 2 : 4);
             manual_turbo_active = true;
-            if (!turbo_was_down) {
+            if (!turbo_was_down && !g_manual_turbo_latched) {
                 char msg[40];
                 if (mult < 0)
                     snprintf(msg, sizeof(msg), "Fast forward: max");
@@ -10757,6 +10901,8 @@ namespace {
     static const char* const kPsxHostShortcutLabels[] = {
         "Rewind",
         "Save states",
+        "Fast-forward",
+        "Fast-forward toggle",
     };
 
     void ae_rui_set_sidecar_paths(const char* argv0) {
@@ -11149,12 +11295,6 @@ int main(int argc, char** argv) {
             game_id   = gc.id;
             game_region = gc.region;
             game_players = gc.players;
-            /* CTR ND intro: an older workaround (PSX_ND_SIB_FLAP_LAST=1) skipped
-             * wide additive 0x36 in OT ranks 1600..2099 to unmask sibling flaps.
-             * After the AVSZ3 MAC0 fix (unshifted product → correct MAC0>>17 OT
-             * indices), flaps/rain sort without that skip — and FLAP_LAST=1
-             * shreds the crate glow fountain. Default is off; opt in via env
-             * (dma.c) only for experiments. */
             apply_offline_pad_count(game_players, multitap_enabled);
             game_has_disc_crc = gc.has_disc_crc;
             game_disc_crc     = gc.disc_crc;
@@ -11261,6 +11401,9 @@ int main(int argc, char** argv) {
             g_video_pgxp_tolerance = (float)gc.runtime.video_pgxp_tolerance;
             g_video_renderer   = gc.runtime.video_renderer;
             g_video_screen     = gc.runtime.video_screen_kind;
+            g_video_scanlines  = gc.runtime.video_scanlines;
+            g_video_scanline_strength =
+                (float)gc.runtime.video_scanline_strength;
             g_video_aspect_num = gc.runtime.video_aspect_num;
             g_video_aspect_den = gc.runtime.video_aspect_den;
             g_low_latency_input = gc.runtime.video_low_latency_input ? 1 : 0;
@@ -11650,6 +11793,9 @@ int main(int argc, char** argv) {
         if (us.has_perspective_texturing)
             g_video_perspective_texturing = us.perspective_texturing ? 1 : 0;
         if (us.has_screen_kind)    g_video_screen    = us.screen_kind;
+        if (us.has_scanlines)      g_video_scanlines = us.scanlines;
+        if (us.has_scanline_strength)
+            g_video_scanline_strength = (float)us.scanline_strength;
         if (us.has_auto_skip_fmv)  g_auto_skip_fmv   = us.auto_skip_fmv ? 1 : 0;
         /* turbo_loads is deliberately NOT restored from settings.toml. It is a
          * write-only latch: the launcher stopped drawing a Turbo loads row when
@@ -11685,6 +11831,13 @@ int main(int argc, char** argv) {
             g_hotkey_pad_save_state_menu = normalize_hotkey_pad_binding(
                 us.hotkey_pad_save_state_menu,
                 PSX_HOTKEY_PAD_SELECT_R1);
+        if (us.has_hotkey_pad_fast_forward)
+            g_hotkey_pad_fast_forward = normalize_hotkey_pad_binding(
+                us.hotkey_pad_fast_forward,
+                PSX_HOTKEY_PAD_SELECT_L1);
+        if (us.has_hotkey_pad_fast_forward_toggle)
+            g_hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
+                us.hotkey_pad_fast_forward_toggle, 0);
         if (us.has_bios_path && !bios_from_cli && !us.bios_path.empty()) {
             settings_bios_storage = us.bios_path.string();
             bios_path = settings_bios_storage.c_str();
@@ -11996,7 +12149,32 @@ int main(int argc, char** argv) {
         extern int g_psx_cps_mode;
         const std::filesystem::path tk_xd = exe_dir_from_argv(argv[0]);
         const std::filesystem::path tk_dir = tk_xd / "overlay_toolchain";
-        const std::filesystem::path tk_py = tk_dir / "python" / "python.exe";
+        /* The bundle's layout is identical on every platform; only the file
+         * NAMES differ. These were hardcoded to the Windows spellings
+         * ("python/python.exe", "psxrecomp-game.exe", "tcc/tcc.exe"), so on
+         * Linux the gate below could never be true no matter what a packager
+         * staged — a bundled Linux toolchain would have been dead weight the
+         * runtime never looked at. (No Linux packager staged one either, so
+         * this had no observable symptom to report: measured 2026-09-02,
+         * `grep -c overlay_toolchain` was 0 in all three forked
+         * tools/package_appimage.sh. Bead beads-eio.3.102.)
+         *
+         * python-build-standalone, the pinned relocatable CPython that
+         * tools/release_stage.py stages on Linux, puts the interpreter at
+         * python/bin/python3; python.org's embeddable zip puts it at
+         * python/python.exe. Keep these in lockstep with
+         * release_stage.TOOLCHAIN_PY_REL / TOOLCHAIN_RECOMPILER. */
+#ifdef _WIN32
+        const std::filesystem::path tk_py =
+            tk_dir / "python" / "python.exe";
+        const char *tk_recompiler = "psxrecomp-game.exe";
+        const char *tk_tcc        = "tcc.exe";
+#else
+        const std::filesystem::path tk_py =
+            tk_dir / "python" / "bin" / "python3";
+        const char *tk_recompiler = "psxrecomp-game";
+        const char *tk_tcc        = "tcc";
+#endif
         const bool tk_present = std::filesystem::exists(tk_py);
         auto build_toolchain_cmd = [&](const char *compiler) {
             auto cmd_quote = [](const std::string& s) {
@@ -12008,13 +12186,14 @@ int main(int argc, char** argv) {
                 " --captures " + cmd_quote(captures_path.string()) +
                 " --game-toml " + cmd_quote(std::string(
                     game_config_path ? game_config_path : "game.toml")) +
-                " --recompiler " + cmd_quote((tk_dir / "psxrecomp-game.exe").string()) +
+                " --recompiler " + cmd_quote((tk_dir / tk_recompiler).string()) +
                 " --runtime-include " + cmd_quote((tk_dir / "include").string()) +
+                " --project-root " + cmd_quote(tk_dir.string()) +
                 " --out-dir " + cmd_quote((tk_xd / "cache").string()) +
                 (g_psx_cps_mode ? " --cps" : "") +
                 " --compiler " + compiler;
             if (std::string(compiler) == "tcc")
-                c += " --tcc " + cmd_quote((tk_dir / "tcc" / "tcc.exe").string());
+                c += " --tcc " + cmd_quote((tk_dir / "tcc" / tk_tcc).string());
             return c;
         };
         int gcc_avail = (deferred_has_overlay_ac || tk_present)
@@ -12148,6 +12327,9 @@ int main(int argc, char** argv) {
             seed.perspective_texturing = (g_video_perspective_texturing != 0);
             seed.has_perspective_texturing = true;
             seed.screen_kind = g_video_screen;            seed.has_screen_kind = true;
+            seed.scanlines = g_video_scanlines;           seed.has_scanlines = true;
+            seed.scanline_strength = g_video_scanline_strength;
+            seed.has_scanline_strength = true;
             seed.auto_skip_fmv = (g_auto_skip_fmv != 0);
             seed.has_auto_skip_fmv = skip_fmv_offered;
             seed.turbo_loads = (g_turbo_loads_enabled != 0);
@@ -12170,6 +12352,10 @@ int main(int argc, char** argv) {
             seed.has_hotkey_pad_rewind = true;
             seed.hotkey_pad_save_state_menu = g_hotkey_pad_save_state_menu;
             seed.has_hotkey_pad_save_state_menu = true;
+            seed.hotkey_pad_fast_forward = g_hotkey_pad_fast_forward;
+            seed.has_hotkey_pad_fast_forward = true;
+            seed.hotkey_pad_fast_forward_toggle = g_hotkey_pad_fast_forward_toggle;
+            seed.has_hotkey_pad_fast_forward_toggle = true;
             seed.skip_launcher = skip_launcher_setting;   seed.has_skip_launcher = true;
             if (has_netplay_player_name) {
                 seed.netplay_player_name = netplay_player_name;
@@ -12294,9 +12480,13 @@ int main(int argc, char** argv) {
                      * 5% normalization then silently reduced to 15%. */
                     ls.deadzone[i] =
                         (player_deadzone[i] * 100 + 32767 / 2) / 32767;
-                    ls.pad_mode[i] = (ls.player_src[i] == 1)
-                                        ? PSXRecompV4::PAD_MODE_DIGITAL
-                                        : player_mode[i];
+                    /* The seat's configured mode, verbatim. A keyboard seat
+                     * is NOT rewritten to DIGITAL on the way in: that told the
+                     * launcher a lie about what the seat is configured for,
+                     * and the launcher then handed the lie back for us to
+                     * persist. The keyboard's runtime behaviour does not
+                     * depend on this value (effective_player_mode). */
+                    ls.pad_mode[i] = player_mode[i];
                     ls.player_gamepad_guid[i][0] = '\0';
                     if (ls.player_src[i] == 2 && !d.empty() && d != "auto" &&
                         d != "gamepad" && d != "controller") {
@@ -12333,6 +12523,11 @@ int main(int argc, char** argv) {
             ls.geometry_correction   = seed.geometry_correction ? 1 : 0;
             ls.perspective_texturing = seed.perspective_texturing ? 1 : 0;
             ls.screen_kind        = seed.screen_kind;
+#if defined(RECOMP_LAUNCHER_HAS_SCANLINES)
+            ls.scanlines             = seed.scanlines ? 1 : 0;
+            ls.scanline_strength_pct = seed.has_scanline_strength
+                ? (int)(seed.scanline_strength * 100.0 + 0.5) : 50;
+#endif
             ls.frame_interp       = seed.frame_interpolation ? 1 : 0;
             ls.frame_interp_fps   = seed.frame_interpolation_fps;
             ls.spu_hq             = seed.spu_hq ? 1 : 0;
@@ -12345,6 +12540,11 @@ int main(int argc, char** argv) {
             ls.assist_pad_bind[PSX_ASSIST_BIND_SAVE_STATE_MENU] =
                 normalize_hotkey_pad_binding(seed.hotkey_pad_save_state_menu,
                     PSX_HOTKEY_PAD_SELECT_R1);
+            ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD] =
+                normalize_hotkey_pad_binding(seed.hotkey_pad_fast_forward,
+                    PSX_HOTKEY_PAD_SELECT_L1);
+            ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE] =
+                normalize_hotkey_pad_binding(seed.hotkey_pad_fast_forward_toggle, 0);
             ls.auto_skip_fmv      = seed.auto_skip_fmv ? 1 : 0;
             ls.turbo_loads        = seed.turbo_loads ? 1 : 0;
             /* Localization: index of resolved_language within lang_menu_options
@@ -12567,21 +12767,30 @@ int main(int argc, char** argv) {
                     for (int i = 0; i < n; ++i) {
                         if (ls.player_src[i] == 1) {
                             player_device[i] = "keyboard";
-                            /* Keyboard is always a digital pad at runtime. */
-                            player_mode[i] = PSXRecompV4::PAD_MODE_DIGITAL;
                         } else if (ls.player_src[i] == 0) {
                             player_device[i] = "none";
-                            player_mode[i] = ls.pad_mode[i];
                         } else if (ls.player_gamepad_guid[i][0]) {
                             player_device[i] = ls.player_gamepad_guid[i];
-                            player_mode[i] = ls.pad_mode[i];
                         } else if (PSXRecompV4::launcher_source_from_device(
                                        player_device[i]) <= 1) {
                             player_device[i] = "gamepad";
-                            player_mode[i] = ls.pad_mode[i];
-                        } else {
-                            player_mode[i] = ls.pad_mode[i];
                         }
+                        /* Mode is resolved separately from the device, because
+                         * the launcher round-trip is the SECOND way a locked
+                         * game could boot an unsupported pad type: the clamp at
+                         * the top of main() runs BEFORE the launcher, so
+                         * ls.pad_mode[] (seeded from settings.toml, or from a
+                         * selector the player never saw because lock_mode hides
+                         * it) would otherwise win here -- and then be persisted
+                         * into seed.p_mode[] a few lines down. Defense in depth:
+                         * the launcher itself no longer corrupts a locked mode
+                         * (recomp-ui launcher_model.c), but the host must not
+                         * depend on that to boot the declared pad type. */
+                        player_mode[i] =
+                            PSXRecompV4::resolve_player_mode_after_launcher(
+                                ls.pad_mode[i], ctrl_lock_mode,
+                                ctrl_locked_mode[i],
+                                g_mod_controller_mode_override[i]);
                         player_deadzone[i] = ls.deadzone[i] * 32767 / 100;
                         if (i < un) {
                             seed.p_device[i] = player_device[i];
@@ -12609,6 +12818,13 @@ int main(int argc, char** argv) {
                 seed.fmv_filter            = launcher_fmv_filter_to_cfg(ls.fmv_filter);
                 seed.has_fmv_filter        = true;
                 seed.screen_kind           = ls.screen_kind;           seed.has_screen_kind           = true;
+#if defined(RECOMP_LAUNCHER_HAS_SCANLINES)
+                seed.scanlines             = ls.scanlines != 0;        seed.has_scanlines             = true;
+                if (ls.scanline_strength_pct >= 0) {
+                    seed.scanline_strength = ls.scanline_strength_pct / 100.0;
+                    seed.has_scanline_strength = true;
+                }
+#endif
                 seed.frame_interpolation   = ls.frame_interp != 0;     seed.has_frame_interpolation   = true;
                 seed.frame_interpolation_fps = ls.frame_interp_fps;    seed.has_frame_interpolation_fps = true;
                 seed.audio_freq            = ls.audio_freq;            seed.has_audio_freq            = true;
@@ -12627,6 +12843,13 @@ int main(int argc, char** argv) {
                     ls.assist_pad_bind[PSX_ASSIST_BIND_SAVE_STATE_MENU],
                     PSX_HOTKEY_PAD_SELECT_R1);
                 seed.has_hotkey_pad_save_state_menu = true;
+                seed.hotkey_pad_fast_forward = normalize_hotkey_pad_binding(
+                    ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD],
+                    PSX_HOTKEY_PAD_SELECT_L1);
+                seed.has_hotkey_pad_fast_forward = true;
+                seed.hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
+                    ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE], 0);
+                seed.has_hotkey_pad_fast_forward_toggle = true;
                 seed.auto_skip_fmv = ls.auto_skip_fmv != 0;
                 seed.has_auto_skip_fmv = skip_fmv_offered;
                 seed.turbo_loads = ls.turbo_loads != 0;
@@ -12816,6 +13039,11 @@ int main(int argc, char** argv) {
                 g_video_geometry_correction   = seed.geometry_correction ? 1 : 0;
                 g_video_perspective_texturing = seed.perspective_texturing ? 1 : 0;
                 g_video_screen    = seed.screen_kind;
+                if (seed.has_scanlines) g_video_scanlines = seed.scanlines;
+                if (seed.has_scanline_strength)
+                    g_video_scanline_strength = (float)seed.scanline_strength;
+                gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
+                                          g_video_scanline_strength);
                 g_auto_skip_fmv = skip_fmv_offered && seed.auto_skip_fmv ? 1 : 0;
                 g_turbo_loads_enabled =
                     turbo_loads_offered && seed.turbo_loads ? 1 : 0;
@@ -12839,6 +13067,12 @@ int main(int argc, char** argv) {
                 g_hotkey_pad_save_state_menu = seed.has_hotkey_pad_save_state_menu
                     ? seed.hotkey_pad_save_state_menu
                     : PSX_HOTKEY_PAD_SELECT_R1;
+                g_hotkey_pad_fast_forward = seed.has_hotkey_pad_fast_forward
+                    ? seed.hotkey_pad_fast_forward
+                    : PSX_HOTKEY_PAD_SELECT_L1;
+                g_hotkey_pad_fast_forward_toggle = seed.has_hotkey_pad_fast_forward_toggle
+                    ? seed.hotkey_pad_fast_forward_toggle
+                    : 0;
                 skip_launcher_setting = seed.skip_launcher;
                 if (seed.has_bios_path) {
                     settings_bios_storage = seed.bios_path.string();
@@ -13181,6 +13415,18 @@ session_reboot:
     gpu_texture_correction_set(g_video_perspective_texturing);
     pgxp_set_cpu_mode(g_video_pgxp_cpu_mode);
     pgxp_set_tolerance(g_video_pgxp_tolerance);
+    /* Scanlines: env override wins over config, same as the corrections above,
+     * so a headless/free-run boot can be captured with the effect armed from the
+     * first present. PSX_SCANLINES=0/1; PSX_SCANLINE_STRENGTH=0..1. Pushed to the
+     * GL renderer, which holds the state and applies it per-draw. */
+    if (const char* e = std::getenv("PSX_SCANLINES"))
+        g_video_scanlines = (*e && *e != '0');
+    if (const char* e = std::getenv("PSX_SCANLINE_STRENGTH")) {
+        float s = (float)atof(e);
+        if (s >= 0.f && s <= 1.f) g_video_scanline_strength = s;
+    }
+    gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
+                              g_video_scanline_strength);
     if (g_video_geometry_correction || g_video_perspective_texturing) {
         std::fprintf(stdout,
                      "psxrecomp: geometry correction %s, perspective texturing %s%s\n",
@@ -13317,7 +13563,8 @@ session_reboot:
             /* We need to adjust the frame pacing for PAL games to run at the
              * correct speed */
             vblank_cycles = 677376u;
-            g_frame_period_ms = 1000.0 / 50.0;  /* 50hz refresh rate */
+            g_guest_frame_period_ms = 1000.0 / 50.0;  /* 50hz refresh rate */
+            g_frame_period_ms = g_guest_frame_period_ms;
         }
         else if (ident.region == "NTSC-J") cdrom_set_disc_scex("SCEI");
         else if (ident.region == "NTSC-U") cdrom_set_disc_scex("SCEA");
@@ -13547,28 +13794,10 @@ session_reboot:
     if (!g_fullscreen && !g_video_win_w_explicit)
         SDL_MaximizeWindow(sdl_window);
 
-    /* Host refresh: if the panel matches the current guest cadence, record it
-     * so driver vsync can own cadence (pacer skipped). Mismatched and unknown
-     * refresh rates keep guest pacing and force swap interval 0; vsync as the
-     * clock would otherwise run the sim at the panel rate. */
-    {
-        SDL_DisplayMode dm;
-        int disp_idx = SDL_GetWindowDisplayIndex(sdl_window);
-        if (disp_idx >= 0 && SDL_GetCurrentDisplayMode(disp_idx, &dm) == 0 && dm.refresh_rate > 0) {
-            double host_hz = (double)dm.refresh_rate;
-            g_host_refresh_hz = host_hz;
-            if (host_refresh_matches_guest_cadence()) {
-                g_frame_period_ms = 1000.0 / host_hz;
-                std::printf("psxrecomp: sync-to-host-refresh: pacing to %.1f Hz panel "
-                            "(%.4f ms/frame)\n", host_hz, g_frame_period_ms);
-            } else {
-                std::printf("psxrecomp: host panel %.1f Hz does not match guest "
-                            "cadence; keeping %.2f Hz pacing\n",
-                            host_hz,
-                            g_frame_period_ms > 0.0 ? 1000.0 / g_frame_period_ms : 0.0);
-            }
-        }
-    }
+    /* Host refresh: if the window's current panel matches the guest cadence,
+     * record it so driver vsync can own cadence. Re-probed while running so
+     * mixed-refresh multi-monitor moves cannot leave this latched at startup. */
+    refresh_host_display_cadence(1, 1);
 
     /* OpenGL backend: create the GL context now. On failure, relabel the
      * facade back to software (rasterization already runs through software in
@@ -14310,6 +14539,10 @@ soft_return_lobby:
         ls.geometry_correction = g_video_geometry_correction ? 1 : 0;
         ls.perspective_texturing = g_video_perspective_texturing ? 1 : 0;
         ls.screen_kind = g_video_screen;
+#if defined(RECOMP_LAUNCHER_HAS_SCANLINES)
+        ls.scanlines             = g_video_scanlines ? 1 : 0;
+        ls.scanline_strength_pct = (int)(g_video_scanline_strength * 100.0f + 0.5f);
+#endif
         ls.frame_interp = g_frame_interpolation ? 1 : 0;
         ls.frame_interp_fps = g_frame_interpolation_fps;
         ls.spu_hq = g_audio_spu_hq ? 1 : 0;
@@ -14326,6 +14559,12 @@ soft_return_lobby:
             normalize_hotkey_pad_binding(
                 g_hotkey_pad_save_state_menu,
                 PSX_HOTKEY_PAD_SELECT_R1);
+        ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD] =
+            normalize_hotkey_pad_binding(
+                g_hotkey_pad_fast_forward,
+                PSX_HOTKEY_PAD_SELECT_L1);
+        ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE] =
+            normalize_hotkey_pad_binding(g_hotkey_pad_fast_forward_toggle, 0);
         ls.aspect_index = (g_video_aspect_num * 9 == g_video_aspect_den * 21) ? 2
             : (g_video_aspect_num == 16 && g_video_aspect_den == 9) ? 1 : 0;
         ls.language_index = 0;
@@ -14375,9 +14614,8 @@ soft_return_lobby:
                     PSXRecompV4::launcher_source_from_device(d);
                 ls.deadzone[i] =
                     (player_deadzone[i] * 100 + 32767 / 2) / 32767;
-                ls.pad_mode[i] = (ls.player_src[i] == 1)
-                                    ? PSXRecompV4::PAD_MODE_DIGITAL
-                                    : player_mode[i];
+                /* Verbatim, as in the first launcher entry above. */
+                ls.pad_mode[i] = player_mode[i];
                 ls.player_gamepad_guid[i][0] = '\0';
                 if (ls.player_src[i] == 2 && !d.empty() && d != "auto" &&
                     d != "gamepad" && d != "controller") {
@@ -14515,20 +14753,27 @@ soft_return_lobby:
                 for (int i = 0; i < n; ++i) {
                     if (ls.player_src[i] == 1) {
                         player_device[i] = "keyboard";
-                        player_mode[i] = PSXRecompV4::PAD_MODE_DIGITAL;
                     } else if (ls.player_src[i] == 0) {
                         player_device[i] = "none";
-                        player_mode[i] = ls.pad_mode[i];
                     } else if (ls.player_gamepad_guid[i][0]) {
                         player_device[i] = ls.player_gamepad_guid[i];
-                        player_mode[i] = ls.pad_mode[i];
                     } else if (PSXRecompV4::launcher_source_from_device(
                                    player_device[i]) <= 1) {
                         player_device[i] = "gamepad";
-                        player_mode[i] = ls.pad_mode[i];
-                    } else {
-                        player_mode[i] = ls.pad_mode[i];
                     }
+                    /* Same resolution as the first launcher-exit path, and the
+                     * mod-override arm matters HERE specifically: `goto
+                     * session_reboot` re-enters the emulator BELOW the block
+                     * that applies g_mod_controller_mode_override, so a soft
+                     * return from the lobby never re-runs it. Before this
+                     * helper existed, an override survived a rematch only
+                     * because it round-tripped through ls.pad_mode[]; a bare
+                     * lock clamp here would have silently dropped it. */
+                    player_mode[i] =
+                        PSXRecompV4::resolve_player_mode_after_launcher(
+                            ls.pad_mode[i], ctrl_lock_mode,
+                            ctrl_locked_mode[i],
+                            g_mod_controller_mode_override[i]);
                     player_deadzone[i] = ls.deadzone[i] * 32767 / 100;
                 }
             }
@@ -14589,6 +14834,14 @@ soft_return_lobby:
                 us.has_perspective_texturing = true;
                 us.screen_kind = ls.screen_kind;
                 us.has_screen_kind = true;
+#if defined(RECOMP_LAUNCHER_HAS_SCANLINES)
+                us.scanlines = ls.scanlines != 0;
+                us.has_scanlines = true;
+                if (ls.scanline_strength_pct >= 0) {
+                    us.scanline_strength = ls.scanline_strength_pct / 100.0;
+                    us.has_scanline_strength = true;
+                }
+#endif
                 us.frame_interpolation = ls.frame_interp != 0;
                 us.has_frame_interpolation = true;
                 us.frame_interpolation_fps = ls.frame_interp_fps;
@@ -14611,6 +14864,13 @@ soft_return_lobby:
                     ls.assist_pad_bind[PSX_ASSIST_BIND_SAVE_STATE_MENU],
                     PSX_HOTKEY_PAD_SELECT_R1);
                 us.has_hotkey_pad_save_state_menu = true;
+                us.hotkey_pad_fast_forward = normalize_hotkey_pad_binding(
+                    ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD],
+                    PSX_HOTKEY_PAD_SELECT_L1);
+                us.has_hotkey_pad_fast_forward = true;
+                us.hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
+                    ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE], 0);
+                us.has_hotkey_pad_fast_forward_toggle = true;
                 us.auto_skip_fmv = ls.auto_skip_fmv != 0;
                 us.has_auto_skip_fmv = skip_fmv_offered;
                 us.turbo_loads = ls.turbo_loads != 0;
@@ -14644,6 +14904,13 @@ soft_return_lobby:
             g_video_geometry_correction = ls.geometry_correction ? 1 : 0;
             g_video_perspective_texturing = ls.perspective_texturing ? 1 : 0;
             g_video_screen = ls.screen_kind;
+#if defined(RECOMP_LAUNCHER_HAS_SCANLINES)
+            g_video_scanlines = ls.scanlines != 0;
+            if (ls.scanline_strength_pct >= 0)
+                g_video_scanline_strength = ls.scanline_strength_pct / 100.0f;
+            gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
+                                      g_video_scanline_strength);
+#endif
             /* Load acceleration and FMV skipping are mod-owned on PSX, and the
              * launcher struct these come from was snapshotted BEFORE
              * mod_runtime_activate_plugins() ran. Applying them here would
@@ -14684,6 +14951,11 @@ soft_return_lobby:
             g_hotkey_pad_save_state_menu = normalize_hotkey_pad_binding(
                 ls.assist_pad_bind[PSX_ASSIST_BIND_SAVE_STATE_MENU],
                 PSX_HOTKEY_PAD_SELECT_R1);
+            g_hotkey_pad_fast_forward = normalize_hotkey_pad_binding(
+                ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD],
+                PSX_HOTKEY_PAD_SELECT_L1);
+            g_hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
+                ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE], 0);
             switch (ls.aspect_index) {
                 case 2:  g_video_aspect_num = 21; g_video_aspect_den = 9; break;
                 case 1:  g_video_aspect_num = 16; g_video_aspect_den = 9; break;

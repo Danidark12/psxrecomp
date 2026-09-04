@@ -476,6 +476,18 @@ if(BUILD_TESTING)
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli_project_packaging.py
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
+        # tools/coverage_vault.py's history compaction and streaming JSON
+        # reader. Pure unit test — loads the module by path, needs no built
+        # target and no generated BIOS. It sat in tools/ with no add_test()
+        # entry anywhere, which is exactly the orphan class
+        # runtime/check_test_registration.cmake exists to prevent; moving it
+        # under tests/ puts it inside that guard's glob.
+        add_test(
+            NAME coverage_vault
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_coverage_vault.py
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
         # The runtime exe name must come from CMake, not be re-derived.
         add_test(
             NAME runtime_exe_name
@@ -492,6 +504,26 @@ if(BUILD_TESTING)
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_overlay_cross_page_delay_codegen.py
                     --recompiler $<TARGET_FILE:psxrecomp-game>
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+        # The overlay capture format's trailing delay-slot guard word: legal
+        # to READ (a branch at the run's last word emits its slot from it),
+        # illegal to ANALYSE (the word after it does not exist). Also pins
+        # that the mandatory-delay-slot throw still fires on an untagged
+        # image, and that no range manifest claims a byte past the image end.
+        # Bead beads-eio.3.100.
+        add_test(
+            NAME overlay_guard_word_analysis_bound
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_overlay_guard_word_analysis_bound.py
+                    --recompiler $<TARGET_FILE:psxrecomp-game>
+            WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+        # Producer half of the same contract: the capture writer declares its
+        # guard bytes and compile_overlays puts them in the PS-EXE tag the
+        # recompiler reads.
+        add_test(
+            NAME overlay_guard_bytes_declaration
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/../tools/tests/test_overlay_guard_bytes_declaration.py
             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
         add_test(
             NAME fmv_cycle_batch_codegen
@@ -590,6 +622,7 @@ if(BUILD_TESTING)
                 fps_telemetry_opt_in
                 frame_interpolation_display_rate
                 hybrid_dev_any_input
+                launcher_pad_mode_wiring
                 launcher_vulkan_option
                 mod_controller_override
                 mod_load_acceleration

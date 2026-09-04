@@ -5,7 +5,8 @@
  * JSON-over-newline protocol on localhost:4370.
  *
  * Same function names and protocol as nesrecomp/snesrecomp versions
- * so TCP.md and DEBUG.md are reusable across projects.
+ * so docs/TCP_COMMANDS.md and docs/internal/DEBUG.md are reusable across
+ * projects.
  */
 /* Expose POSIX clock_gettime()/CLOCK_MONOTONIC (used by monotonic_ms) on
  * glibc — must precede any system header. Harmless on Windows/macOS. */
@@ -3261,7 +3262,7 @@ static void handle_dirty_insn_dump_file(int id, const char *json)
 
 /* ---- parity_dump / parity_ctl: general two-process control-flow parity ring.
  * Mirrors the IDENTICAL command on psx-beetle so tools/parity_diff.py can pull
- * both timelines and align by logical sequence (PRINCIPLES.md first-divergence). */
+ * both timelines and align by logical sequence (docs/internal/PRINCIPLES.md first-divergence). */
 /* Two rows have the same watched-STATE iff their watch words + epc + tcb_state
  * match (pc/ra/sp ignored). Used by the `transitions` dump filter to collapse
  * runs of identical-state dispatch rows into one (with a `reps` count), so a
@@ -5250,7 +5251,7 @@ static void handle_geom_correction(int id, const char *json)
  * geom_correction's "pgxp" object, flattened). */
 static void handle_pgxp(int id, const char *json)
 {
-    /* Live toggles for the one-toggle-at-a-time A/B protocol (ENHANCEMENTS.md
+    /* Live toggles for the one-toggle-at-a-time A/B protocol (docs/ENHANCEMENTS.md
      * G1.6 method rule): same scene, flip one knob, screenshot_hires. */
     int geom = json_get_int(json, "geometry", -1);
     if (geom >= 0)
@@ -5870,7 +5871,7 @@ static void handle_dma_state(int id, const char *json)
     DMADebugState s;
     dma_debug_get_state(&s);
 
-    char buf[2048];
+    char buf[4096];
     size_t pos = 0;
     pos += snprintf(buf + pos, sizeof(buf) - pos,
                     "{\"id\":%d,\"ok\":true,\"dpcr\":\"0x%08X\","
@@ -5888,7 +5889,54 @@ static void handle_dma_state(int id, const char *json)
                         s.channels[i].remaining_words,
                         s.channels[i].cycles_accum);
     }
-    snprintf(buf + pos, sizeof(buf) - pos, "]}");
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "]");
+
+    {
+        DMAGpuOtStats ot;
+        dma_debug_get_gpu_ot_stats(&ot);
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        ",\"gpu_ot\":{\"starts\":%llu,\"starts_dropped\":%llu,"
+                        "\"completes\":%llu,\"cancels\":%llu,"
+                        "\"nodes_last\":%u,\"nodes_max\":%u,"
+                        "\"words_last\":%u,\"words_max\":%u,"
+                        "\"cycles_last\":%llu,\"cycles_max\":%llu,"
+                        "\"active\":%u}",
+                        (unsigned long long)ot.starts,
+                        (unsigned long long)ot.starts_dropped,
+                        (unsigned long long)ot.completes,
+                        (unsigned long long)ot.cancels,
+                        ot.nodes_last, ot.nodes_max,
+                        ot.words_last, ot.words_max,
+                        (unsigned long long)ot.cycles_last,
+                        (unsigned long long)ot.cycles_max,
+                        ot.active);
+        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                        ",\"gpu_ot_chcr\":{\"reads_total\":%llu,"
+                        "\"reads_in_walk\":%llu,\"cancel_ring_count\":%u,"
+                        "\"initiator_pc\":\"0x%08X\"},"
+                        "\"gpu_ot_cancels\":[",
+                        (unsigned long long)ot.chcr_reads_total,
+                        (unsigned long long)ot.chcr_reads_in_walk,
+                        ot.cancel_ring_count,
+                        ot.initiator_pc);
+        unsigned n = ot.cancel_ring_count < DMA_GPU_OT_CANCEL_RING
+                   ? ot.cancel_ring_count : DMA_GPU_OT_CANCEL_RING;
+        uint32_t first = ot.cancel_ring_count > DMA_GPU_OT_CANCEL_RING
+                       ? ot.cancel_ring_count - DMA_GPU_OT_CANCEL_RING : 0u;
+        for (unsigned k = 0; k < n && pos < sizeof(buf) - 192; k++) {
+            const DMAGpuOtCancel *c = &ot.cancel_ring[(first + k) %
+                                                      DMA_GPU_OT_CANCEL_RING];
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                            "%s{\"pc\":\"0x%08X\",\"chcr\":\"0x%08X\","
+                            "\"nodes\":%u,\"words\":%u,\"cycles\":%u,"
+                            "\"polls\":%u}",
+                            k ? "," : "", c->pc, c->chcr,
+                            c->nodes, c->words, c->cycles, c->polls);
+        }
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "]");
+    }
+
+    snprintf(buf + pos, sizeof(buf) - pos, "}");
     debug_server_send_line(buf);
 }
 
@@ -7844,6 +7892,25 @@ static void handle_ws_nw(int id, const char *json)
     gpu_ws_get_debug(&ws);
     send_fmt("{\"id\":%d,\"ok\":true,\"native_wide\":%d,\"mode\":%d,\"nw_extra\":%d}",
              id, psx_ws_get_native_wide(), ws.mode, ws.nw_extra);
+}
+
+/* Live scanline post-process toggle (A/B): `scanline on=<0|1> pct=<0..100>`.
+ * Either field is optional — omit `on` to keep the current toggle, omit `pct`
+ * to keep the current strength. Reports the resulting state. */
+extern void psx_video_set_scanlines(int on, float strength);
+extern int  psx_video_get_scanlines(float *strength);
+static void handle_scanline(int id, const char *json)
+{
+    int on  = json_get_int(json, "on", -1);
+    int pct = json_get_int(json, "pct", -1);
+    float cur = 0.f;
+    int cur_on = psx_video_get_scanlines(&cur);
+    int new_on = (on >= 0) ? (on ? 1 : 0) : cur_on;
+    float new_s = (pct >= 0 && pct <= 100) ? (float)pct / 100.f : cur;
+    psx_video_set_scanlines(new_on, new_s);
+    cur_on = psx_video_get_scanlines(&cur);
+    send_fmt("{\"id\":%d,\"ok\":true,\"scanlines\":%d,\"strength_pct\":%d}",
+             id, cur_on, (int)(cur * 100.f + 0.5f));
 }
 
 /* ws_backdrop_ring: dump the always-on auto_backdrop rewrite ring (which windows
@@ -13531,6 +13598,7 @@ static const CmdEntry s_commands[] = {
     { "kernel_bless",      handle_kernel_bless },
     { "ws_aspect",         handle_ws_aspect },
     { "ws_nw",             handle_ws_nw },
+    { "scanline",          handle_scanline },
     { "ws_backdrop_ring",  handle_ws_backdrop_ring },
     { "ws_ui_groups",      handle_ws_ui_groups },
     { "ws_backdrop_margin", handle_ws_backdrop_margin },

@@ -21,6 +21,7 @@
 #include "mdec.h"
 #include "mod_memory.h"
 #include "overlay_capture.h"
+#include "psx_cycles.h"
 #include "spu.h"
 #include "audio_trace.h"
 #include "event_ring.h"
@@ -63,6 +64,9 @@ typedef struct {
 static DMAAsyncChannel mdec_async[2];
 static DMAAsyncChannel cdrom_async;
 static DMAGPULinkedList gpu_linked_list;
+static DMAGpuOtStats gpu_ot_stats;
+static uint64_t gpu_ot_start_cycle;
+static uint32_t gpu_ot_polls_this_walk;
 
 /* ---- CD DMA transfer log ---- */
 /* Every forward CH3 DMA that lands below 0x1C0000 (game data region) records
@@ -200,6 +204,18 @@ static void trace_dma_reg_write(uint32_t addr, uint32_t val, uint32_t mask,
     e->i_stat_after = i_stat;
     e->func = g_debug_current_func_addr;
     e->pc = g_debug_last_store_pc;
+}
+
+static void gpu_ot_record_walk_stats(uint64_t cycles) {
+    gpu_ot_stats.nodes_last = gpu_linked_list.nodes_processed;
+    gpu_ot_stats.words_last = gpu_linked_list.total_words;
+    gpu_ot_stats.cycles_last = cycles;
+    if (gpu_ot_stats.nodes_last > gpu_ot_stats.nodes_max)
+        gpu_ot_stats.nodes_max = gpu_ot_stats.nodes_last;
+    if (gpu_ot_stats.words_last > gpu_ot_stats.words_max)
+        gpu_ot_stats.words_max = gpu_ot_stats.words_last;
+    if (gpu_ot_stats.cycles_last > gpu_ot_stats.cycles_max)
+        gpu_ot_stats.cycles_max = gpu_ot_stats.cycles_last;
 }
 
 /* ---- Helpers ---- */
@@ -392,6 +408,18 @@ static void cancel_async_transfer(int ch) {
         cdrom_async.cycles_accum = 0;
     }
     if (ch == 2 && gpu_linked_list.active) {
+        uint64_t cycles = psx_cycle_count - gpu_ot_start_cycle;
+        gpu_ot_record_walk_stats(cycles);
+        DMAGpuOtCancel *c = &gpu_ot_stats.cancel_ring[
+            gpu_ot_stats.cancel_ring_count % DMA_GPU_OT_CANCEL_RING];
+        c->pc     = g_debug_last_store_pc;
+        c->chcr   = channels[2].chcr;
+        c->nodes  = gpu_linked_list.nodes_processed;
+        c->words  = gpu_linked_list.total_words;
+        c->cycles = cycles > UINT32_MAX ? UINT32_MAX : (uint32_t)cycles;
+        c->polls  = gpu_ot_polls_this_walk;
+        gpu_ot_stats.cancel_ring_count++;
+        gpu_ot_stats.cancels++;
         gpu_ws_end_linked_list();
         dma_gpu_ll_cancel(&gpu_linked_list);
     }
@@ -659,18 +687,6 @@ static void execute_ch1_mdec_out(void) {
     complete_transfer(1);
 }
 
-static int gpu_ll_nd_flap_last(void) {
-    static int enabled = -1;
-    if (enabled < 0) {
-        const char *e = getenv("PSX_ND_SIB_FLAP_LAST");
-        if (!e || !*e) e = getenv("PSX_ND_OT_OPAQUE_LAST");
-        enabled = (e && *e && *e != '0') ? 1 : 0;
-        if (enabled)
-            fprintf(stdout, "psxrecomp: PSX_ND_SIB_FLAP_LAST enabled\n");
-    }
-    return enabled;
-}
-
 static uint32_t gpu_ll_resolve_address(void *opaque, uint32_t address) {
     (void)opaque;
     return psx_mod_gpu_dma_resolve_address(address);
@@ -681,31 +697,18 @@ static uint32_t gpu_ll_read_word(void *opaque, uint32_t address) {
     return psx_read_word(address);
 }
 
+static void gpu_ll_observe_header(void *opaque, uint32_t addr,
+                                  uint32_t header) {
+    (void)opaque;
+    gpu_ws_validate_linked_list_header(addr, header);
+}
+
 static int gpu_ll_begin_node(void *opaque, uint32_t addr, uint32_t num_words) {
     (void)opaque;
-    int emit = 1;
-    uint32_t ot_rank = gpu_linked_list.empty_rank;
 
-    if (gpu_ll_nd_flap_last() && num_words >= 6u &&
-        ot_rank >= 1600u && ot_rank < 2100u) {
-        uint32_t word_addr = psx_mod_gpu_dma_resolve_address(addr + 4u);
-        uint32_t cmd = psx_read_word(word_addr);
-        uint32_t op = (cmd >> 24) & 0xFFu;
-        if (op == 0x36u) {
-            int32_t sx_max = -0x8000;
-            for (uint32_t vi = 1; vi <= 5; vi += 2) {
-                uint32_t xy = psx_read_word(psx_mod_gpu_dma_resolve_address(
-                    word_addr + vi * 4u));
-                int32_t sx = (int32_t)(xy & 0x7FFu);
-                if (sx & 0x400) sx -= 0x800;
-                if (sx > sx_max) sx_max = sx;
-            }
-            if (sx_max >= 280) emit = 0;
-        }
-    }
-
-    if (emit) gpu_set_gp0_linked_list_node(addr, num_words);
-    return emit;
+    gpu_ws_validate_linked_list_node(addr, num_words);
+    gpu_set_gp0_linked_list_node(addr, num_words);
+    return 1;
 }
 
 static void gpu_ll_emit_word(void *opaque, uint32_t address, uint32_t word) {
@@ -716,6 +719,8 @@ static void gpu_ll_emit_word(void *opaque, uint32_t address, uint32_t word) {
 
 static void gpu_ll_complete(void *opaque, int hit_limit) {
     (void)opaque;
+    gpu_ot_stats.completes++;
+    gpu_ot_record_walk_stats(psx_cycle_count - gpu_ot_start_cycle);
     channels[2].madr = hit_limit ? gpu_linked_list.current_addr
                                  : 0x00FFFFFFu;
     gpu_ws_end_linked_list();
@@ -725,13 +730,17 @@ static void gpu_ll_complete(void *opaque, int hit_limit) {
 static const DMAGPULinkedListOps gpu_ll_ops = {
     gpu_ll_resolve_address,
     gpu_ll_read_word,
+    gpu_ll_observe_header,
     gpu_ll_begin_node,
     gpu_ll_emit_word,
     gpu_ll_complete
 };
 
 static void start_async_gpu_linked_list(void) {
-    if (gpu_linked_list.active) return;
+    if (gpu_linked_list.active) {
+        gpu_ot_stats.starts_dropped++;
+        return;
+    }
     uint32_t start_addr = psx_mod_gpu_dma_resolve_address(channels[2].madr);
     gpu_ws_begin_linked_list();
     /* This scan only prepares optional widescreen grouping. It does not send
@@ -740,6 +749,9 @@ static void start_async_gpu_linked_list(void) {
     gpu_ws_prepass_linked_list(start_addr);
     dma_gpu_ll_start(&gpu_linked_list, start_addr, 0x40000u);
     event_ring_record_aux(EV_DMA_SCHED, 2u, channels[2].chcr);
+    gpu_ot_stats.starts++;
+    gpu_ot_start_cycle = psx_cycle_count;
+    gpu_ot_polls_this_walk = 0;
 }
 
 static uint32_t execute_ch2_gpu(void) {
@@ -1205,7 +1217,15 @@ uint32_t dma_read(uint32_t addr) {
         switch (reg) {
             case 0x00: return channels[ch].madr;
             case 0x04: return channels[ch].bcr;
-            case 0x08: return channels[ch].chcr;
+            case 0x08:
+                if (ch == 2) {
+                    gpu_ot_stats.chcr_reads_total++;
+                    if (gpu_linked_list.active) {
+                        gpu_ot_stats.chcr_reads_in_walk++;
+                        gpu_ot_polls_this_walk++;
+                    }
+                }
+                return channels[ch].chcr;
             case 0x0C: return 0;
             default: goto bad;
         }
@@ -1292,6 +1312,13 @@ void dma_write(uint32_t addr, uint32_t val) {
     dma_write_masked(addr, val, 0xFFFFFFFFu);
 }
 
+void dma_debug_get_gpu_ot_stats(DMAGpuOtStats* out) {
+    if (!out) return;
+    *out = gpu_ot_stats;
+    out->initiator_pc = s_dma_ch_initiator_pc[2];
+    out->active = gpu_linked_list.active;
+}
+
 uint64_t dma_debug_get_trace(const DMATraceEntry** out_entries) {
     if (out_entries) *out_entries = dma_trace;
     return dma_trace_seq;
@@ -1329,7 +1356,8 @@ void dma_debug_get_state(DMADebugState* out) {
             delayed_complete[i].active;
         out->channels[i].remaining_words =
             (i < 2 && mdec_async[i].active) ? mdec_async[i].remaining_words :
-            (i == 2 && gpu_linked_list.active) ? gpu_linked_list.word_count :
+            (i == 2 && gpu_linked_list.active)
+                ? gpu_linked_list.word_count - gpu_linked_list.payload_index :
             (i == 3 && cdrom_async.active) ? cdrom_async.remaining_words :
             delayed_complete[i].total_words;
         out->channels[i].cycles_accum =
@@ -1346,7 +1374,7 @@ void dma_debug_get_state(DMADebugState* out) {
 /* DMAChannel = 3×u32 (no pad). Async/delayed structs have host padding — field LE. */
 #define DMA_ASYNC_WIRE (1u + 1u + 4u + 4u + 4u + 4u) /* 18 */
 #define DMA_DELAY_WIRE (1u + 4u + 4u)                 /* 9 */
-#define DMA_GPU_LL_WIRE (4u + (9u * 4u))              /* 40 */
+#define DMA_GPU_LL_WIRE (4u + (10u * 4u))             /* 44 */
 #define DMA_SNAP_WIRE_BYTES ( \
     (7u * 12u) + 4u + 4u + (2u * DMA_ASYNC_WIRE) + DMA_ASYNC_WIRE + \
     DMA_GPU_LL_WIRE + (7u * DMA_DELAY_WIRE))
@@ -1366,18 +1394,22 @@ static int dma_w_gpu_ll(PstW *w, const DMAGPULinkedList *s) {
            pst_w_u8(w, s->emit_node) && pst_w_u8(w, s->hit_limit) &&
            pst_w_u32(w, s->start_addr) && pst_w_u32(w, s->current_addr) &&
            pst_w_u32(w, s->next_addr) && pst_w_u32(w, s->word_count) &&
+           pst_w_u32(w, s->payload_index) &&
            pst_w_u32(w, s->cycles_remaining) &&
            pst_w_u32(w, s->nodes_processed) && pst_w_u32(w, s->max_nodes) &&
            pst_w_u32(w, s->total_words) && pst_w_u32(w, s->empty_rank);
 }
 static int dma_r_gpu_ll(PstR *r, DMAGPULinkedList *s) {
-    return pst_r_u8(r, &s->active) && pst_r_u8(r, &s->phase) &&
+    int ok = pst_r_u8(r, &s->active) && pst_r_u8(r, &s->phase) &&
            pst_r_u8(r, &s->emit_node) && pst_r_u8(r, &s->hit_limit) &&
            pst_r_u32(r, &s->start_addr) && pst_r_u32(r, &s->current_addr) &&
            pst_r_u32(r, &s->next_addr) && pst_r_u32(r, &s->word_count) &&
+           pst_r_u32(r, &s->payload_index) &&
            pst_r_u32(r, &s->cycles_remaining) &&
            pst_r_u32(r, &s->nodes_processed) && pst_r_u32(r, &s->max_nodes) &&
            pst_r_u32(r, &s->total_words) && pst_r_u32(r, &s->empty_rank);
+    return ok && s->payload_index <= s->word_count &&
+           s->phase <= DMA_GPU_LL_PHASE_PAYLOAD;
 }
 static int dma_w_delay(PstW *w, const DMADelayedComplete *d) {
     return pst_w_u8(w, d->active) && pst_w_u32(w, d->total_words) &&

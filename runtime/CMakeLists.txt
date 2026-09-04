@@ -20,7 +20,7 @@ psxrecomp_add_runtime_target(psx-runtime
 # With -DPSX_PGXP_VARIANT=ON, psxrecomp_add_runtime_target auto-clones a
 # psx-runtime-pgxp sibling (PSXRecomp_pgxp.exe) compiled with -DPSX_PGXP=1 —
 # the framework-dev validation surface for the PGXP value-propagation engine
-# (ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
+# (docs/ENHANCEMENTS.md G1.10). Titles get their <exe>_pgxp the same way.
 
 if(BUILD_TESTING)
     add_executable(launcher_device_roundtrip_test
@@ -28,6 +28,17 @@ if(BUILD_TESTING)
     target_include_directories(launcher_device_roundtrip_test PRIVATE include)
     add_test(NAME launcher_device_roundtrip_test
              COMMAND launcher_device_roundtrip_test)
+
+    # Pad-mode resolution at the launcher exit seam: a lock_mode title must
+    # boot the pad type its game.toml declared whatever the launcher hands
+    # back, an active mod controller-mode override must outrank the lock, and
+    # neither may let an unsupported mode reach settings.toml. Header-only, so
+    # it needs nothing but runtime/include.
+    add_executable(launcher_pad_mode_resolve_test
+        tests/test_launcher_pad_mode_resolve.cpp)
+    target_include_directories(launcher_pad_mode_resolve_test PRIVATE include)
+    add_test(NAME launcher_pad_mode_resolve_test
+             COMMAND launcher_pad_mode_resolve_test)
 
     # COP0.CAUSE IP2 must mirror the INTC line combinationally, never latch.
     add_executable(cause_ip2_combinational_test
@@ -132,7 +143,7 @@ if(BUILD_TESTING)
         PSX_ENABLE_BLOCK_CYCLES=1)
     add_test(NAME gte_register_access_test COMMAND gte_register_access_test)
 
-    # PGXP value-propagation engine (ENHANCEMENTS.md G1.2/G1.3): shadow
+    # PGXP value-propagation engine (docs/ENHANCEMENTS.md G1.2/G1.3): shadow
     # load/store/COP2 roundtrips, half-word semantics, validate-on-read
     # (foreign overwrite + DMA-overwrite rejection), MOVE/repack arithmetic,
     # suppression bracket, invalidate-all, and GetPreciseVertex safeguards
@@ -160,6 +171,11 @@ if(BUILD_TESTING)
         src/ws_ui_group.c)
     target_include_directories(ws_ui_group_test PRIVATE include)
     add_test(NAME ws_ui_group_test COMMAND ws_ui_group_test)
+
+    add_executable(ws_prepass_guard_test
+        tests/test_ws_prepass_guard.c)
+    target_include_directories(ws_prepass_guard_test PRIVATE include)
+    add_test(NAME ws_prepass_guard_test COMMAND ws_prepass_guard_test)
 
     add_executable(mod_gpu_dma_aperture_test
         tests/test_mod_gpu_dma_aperture.c)
@@ -518,12 +534,42 @@ if(BUILD_TESTING)
         add_test(NAME pal_cadence_host_refresh_test
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pal_cadence_host_refresh.py)
+        add_test(NAME mixed_refresh_display_cadence_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mixed_refresh_display_cadence.py)
         add_test(NAME cdrom_lid_integration_test
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cdrom_lid_integration.py)
         add_test(NAME bios_registry_zero_entry_guard_test
                  COMMAND ${Python3_EXECUTABLE}
                          ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_bios_registry_zero_entry.py)
+        # Exercises runtime/psx_check_mod_catalog.cmake -- the build-time guard
+        # that fails a build when a title's mod packages land in the legacy
+        # mods/packages layout instead of mods/bundled (bead beads-eio.3.101).
+        # Needs the cmake executable, since the guard is a cmake -P script.
+        add_test(NAME mod_catalog_layout_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_mod_catalog_layout.py
+                         --cmake ${CMAKE_COMMAND})
+        # The overlay cache tag may be formatted in exactly two files. Three
+        # release packagers hand-built it instead, the flavor-suffix fix reached
+        # one of them, and the other two could not stage a matching Linux cache
+        # at all -- Tomba 2 v0.0.9 shipped with no AppImage as a result.
+        # bead beads-eio.3.102. This test is also the SHARED check a title's own
+        # suite runs against its own tree (pass --root <repo>), so the rule has
+        # one implementation like the staging it guards.
+        add_test(NAME packagers_never_format_cache_tag_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_packagers_never_format_cache_tag.py)
+        # Behavioural half of the same bead: tools/release_stage.py must select
+        # shards by the tag DIRECTORY's identity (the old `-path "*/<tag>/*"`
+        # substring match rejected the real ..._f0 directory and staged zero),
+        # must never ship .abi_<tag>.ok / .c / .pair-lock, and must fail rather
+        # than warn on an empty selection. Hermetic: synthetic cache trees, no
+        # recompiler or captures needed.
+        add_test(NAME release_stage_cache_test
+                 COMMAND ${Python3_EXECUTABLE}
+                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_release_stage_cache.py)
     endif()
 
     # Full card protocol regression: read, write, address echo, per-slot state,
