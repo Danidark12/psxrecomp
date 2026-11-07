@@ -871,6 +871,14 @@ def verify_disc_path(
     ok = (md5 in md5s) or (sha1 in sha1s)
     if not ok and sizes and size in sizes and not md5s and not sha1s:
         ok = True
+    if not ok and sizes and size in sizes:
+        # Local patch: accept own dumps / patched images (e.g. undub) whose
+        # size matches the known image even if the digests differ.
+        progress.log(
+            f"WARNING: digests differ from known dump but size matches "
+            f"(size={size} md5={md5} sha1={sha1}); accepting."
+        )
+        ok = True
     if not ok:
         raise DiscVerifyError(
             f"disc digests not in prepare_disc.known_* "
@@ -1433,6 +1441,61 @@ def _soft_stop(pid: int, timeout: int = 30) -> None:
         pass
 
 
+def _win_post_close(pid: int) -> int:
+    """Windows: send WM_CLOSE to every top-level window of `pid`.
+
+    SDL turns WM_CLOSE into SDL_QUIT, which the runtime handles with
+    shutdown_runtime() + exit(0) -- a clean exit, so the instrumented binary
+    writes its .profraw. (os.kill on Windows is TerminateProcess: a hard kill
+    that skips the profile flush, and probing with os.kill(pid, 0) raises
+    PermissionError [WinError 5] instead of ProcessLookupError.)
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    WM_CLOSE = 0x0010
+    sent = [0]
+
+    def _cb(hwnd, _lparam):
+        owner = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+            sent[0] += 1
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(_cb), 0)
+    return sent[0]
+
+
+def _soft_stop_proc(proc: "subprocess.Popen", timeout: int = 30) -> None:
+    """Ask a training run to exit cleanly; hard-kill only as a last resort."""
+    if proc.poll() is not None:
+        return
+    if os.name != "nt":
+        _soft_stop(proc.pid, timeout)
+        return
+    for attempt in range(timeout):
+        if proc.poll() is not None:
+            return
+        if attempt % 5 == 0:
+            try:
+                _win_post_close(proc.pid)
+            except Exception:  # noqa: BLE001 - best effort
+                pass
+        time.sleep(1)
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
 def _pgo_train_warning(*, hide_video: bool) -> str:
     if hide_video:
         return (
@@ -1473,6 +1536,22 @@ def run_pgo_train(
     env = os.environ.copy()
     env.setdefault("PSX_BIOS_HLE", "0")
     env["LLVM_PROFILE_FILE"] = str(pgo_dir / "bpe-%p.profraw")
+    # Local patch: [pgo] train_load_slot = N (save-state slot as shown in the
+    # game, 1..12) starts each train run from that state, e.g. right before an
+    # FMV that is otherwise minutes into the game.
+    try:
+        _slot = int((load_sections(config).get("pgo") or {}).get("train_load_slot") or 0)
+    except (OSError, ValueError, TypeError):
+        _slot = 0
+    if 1 <= _slot <= 12:
+        env["PSX_LOAD_SLOT"] = str(_slot - 1)
+        # A save state made in normal play was taken with kernel-call HLE on
+        # (settings bios_hle = true); restoring it under the real BIOS path
+        # (PSX_BIOS_HLE=0, the train default) leaves the kernel in RAM
+        # inconsistent and the game crashes at frame 0. Match normal play.
+        _hle = (load_sections(config).get("pgo") or {}).get("train_bios_hle", True)
+        env["PSX_BIOS_HLE"] = "1" if _hle else "0"
+        progress.log(f"PGO train starts from save-state slot {_slot}.")
     # Discard SDL output; SPU/CD still advance (profiles stay valid).
     if mute_host_audio:
         env["PSX_HOST_MUTE"] = "1"
@@ -1533,12 +1612,14 @@ def run_pgo_train(
             stderr=subprocess.DEVNULL,
         )
         time.sleep(train_secs)
-        if proc.poll() is None:
-            _soft_stop(proc.pid)
+        _soft_stop_proc(proc)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     n_gcda = len(list(build_dir.rglob("*.gcda")))
     n_raw = len(list(pgo_dir.glob("*.profraw")))
