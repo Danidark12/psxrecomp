@@ -600,7 +600,17 @@ static bool host_hotkey_input_focused(void) {
     return (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_INPUT_FOCUS) != 0;
 }
 
+/* Fast-forward speed from settings.toml [hotkeys] fast_forward_speed
+ * (launcher "Shortcuts" page): 2..16 = Nx, 0 = max. The env var
+ * PSX_FAST_FORWARD_SPEED still overrides it when set. */
+static int g_fast_forward_speed = 4;
+
 static int manual_fast_forward_multiplier(void) {
+    {
+        const char *e = std::getenv("PSX_FAST_FORWARD_SPEED");
+        if (!e || !e[0])
+            return g_fast_forward_speed == 0 ? -1 : g_fast_forward_speed;
+    }
     static int value = -2; /* -2 = unread, -1 = max/unbounded */
     if (value == -2) {
         const char *e = std::getenv("PSX_FAST_FORWARD_SPEED");
@@ -11144,6 +11154,10 @@ namespace {
         gi->assist_binding_count = PSX_ASSIST_BIND_COUNT;
         gi->has_skip_fmv = skip_fmv_offered_b ? 1 : 0;
         gi->has_turbo_loads = turbo_loads_offered_b ? 1 : 0;
+        /* Fast-forward speed slider on the launcher Shortcuts page:
+         * 2x..16x, 17 = MAX (unbounded). */
+        gi->assist_fast_forward_min = 2;
+        gi->assist_fast_forward_max = 17;
         gi->has_geometry_precision = 1;
         gi->has_rewind_depth = 1;
         if (language_labels && num_languages > 0) {
@@ -12024,6 +12038,8 @@ int main(int argc, char** argv) {
         if (us.has_hotkey_pad_fast_forward_toggle)
             g_hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
                 us.hotkey_pad_fast_forward_toggle, 0);
+        if (us.has_fast_forward_speed)
+            g_fast_forward_speed = us.fast_forward_speed;
         if (us.has_bios_path && !bios_from_cli && !us.bios_path.empty()) {
             settings_bios_storage = us.bios_path.string();
             bios_path = settings_bios_storage.c_str();
@@ -12542,6 +12558,8 @@ int main(int argc, char** argv) {
             seed.has_hotkey_pad_fast_forward = true;
             seed.hotkey_pad_fast_forward_toggle = g_hotkey_pad_fast_forward_toggle;
             seed.has_hotkey_pad_fast_forward_toggle = true;
+            seed.fast_forward_speed = g_fast_forward_speed;
+            seed.has_fast_forward_speed = true;
             seed.skip_launcher = skip_launcher_setting;   seed.has_skip_launcher = true;
             if (has_netplay_player_name) {
                 seed.netplay_player_name = netplay_player_name;
@@ -12731,6 +12749,9 @@ int main(int argc, char** argv) {
                     PSX_HOTKEY_PAD_SELECT_L1);
             ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE] =
                 normalize_hotkey_pad_binding(seed.hotkey_pad_fast_forward_toggle, 0);
+            /* Launcher slider 2..17; 17 shows as MAX (settings value 0). */
+            ls.assist_fast_forward_multiplier =
+                seed.fast_forward_speed == 0 ? 17 : seed.fast_forward_speed;
             ls.auto_skip_fmv      = seed.auto_skip_fmv ? 1 : 0;
             ls.turbo_loads        = seed.turbo_loads ? 1 : 0;
             /* Localization: index of resolved_language within lang_menu_options
@@ -13036,6 +13057,11 @@ int main(int argc, char** argv) {
                 seed.hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
                     ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE], 0);
                 seed.has_hotkey_pad_fast_forward_toggle = true;
+                seed.fast_forward_speed =
+                    ls.assist_fast_forward_multiplier >= 17 ? 0
+                    : ls.assist_fast_forward_multiplier >= 2
+                        ? ls.assist_fast_forward_multiplier : 4;
+                seed.has_fast_forward_speed = true;
                 seed.auto_skip_fmv = ls.auto_skip_fmv != 0;
                 seed.has_auto_skip_fmv = skip_fmv_offered;
                 seed.turbo_loads = ls.turbo_loads != 0;
@@ -13259,6 +13285,8 @@ int main(int argc, char** argv) {
                 g_hotkey_pad_fast_forward_toggle = seed.has_hotkey_pad_fast_forward_toggle
                     ? seed.hotkey_pad_fast_forward_toggle
                     : 0;
+                if (seed.has_fast_forward_speed)
+                    g_fast_forward_speed = seed.fast_forward_speed;
                 skip_launcher_setting = seed.skip_launcher;
                 if (seed.has_bios_path) {
                     settings_bios_storage = seed.bios_path.string();
@@ -14751,6 +14779,8 @@ soft_return_lobby:
                 PSX_HOTKEY_PAD_SELECT_L1);
         ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE] =
             normalize_hotkey_pad_binding(g_hotkey_pad_fast_forward_toggle, 0);
+        ls.assist_fast_forward_multiplier =
+            g_fast_forward_speed == 0 ? 17 : g_fast_forward_speed;
         ls.aspect_index = (g_video_aspect_num * 9 == g_video_aspect_den * 21) ? 2
             : (g_video_aspect_num == 16 && g_video_aspect_den == 9) ? 1 : 0;
         ls.language_index = 0;
@@ -15057,6 +15087,11 @@ soft_return_lobby:
                 us.hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
                     ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE], 0);
                 us.has_hotkey_pad_fast_forward_toggle = true;
+                us.fast_forward_speed =
+                    ls.assist_fast_forward_multiplier >= 17 ? 0
+                    : ls.assist_fast_forward_multiplier >= 2
+                        ? ls.assist_fast_forward_multiplier : 4;
+                us.has_fast_forward_speed = true;
                 us.auto_skip_fmv = ls.auto_skip_fmv != 0;
                 us.has_auto_skip_fmv = skip_fmv_offered;
                 us.turbo_loads = ls.turbo_loads != 0;
@@ -15142,6 +15177,10 @@ soft_return_lobby:
                 PSX_HOTKEY_PAD_SELECT_L1);
             g_hotkey_pad_fast_forward_toggle = normalize_hotkey_pad_binding(
                 ls.assist_pad_bind[PSX_ASSIST_BIND_FAST_FORWARD_TOGGLE], 0);
+            g_fast_forward_speed =
+                ls.assist_fast_forward_multiplier >= 17 ? 0
+                : ls.assist_fast_forward_multiplier >= 2
+                    ? ls.assist_fast_forward_multiplier : g_fast_forward_speed;
             switch (ls.aspect_index) {
                 case 2:  g_video_aspect_num = 21; g_video_aspect_den = 9; break;
                 case 1:  g_video_aspect_num = 16; g_video_aspect_den = 9; break;

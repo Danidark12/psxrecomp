@@ -1266,6 +1266,8 @@ struct UserSettings {
     // keyboard [KeyMap] Turbo (Tab). 0 = unbound.
     bool has_hotkey_pad_fast_forward = false; int hotkey_pad_fast_forward = 1528; /* select+l1 */
     bool has_hotkey_pad_fast_forward_toggle = false; int hotkey_pad_fast_forward_toggle = 0; /* unbound */
+    // fast_forward_speed: fast-forward target speed (2..16 = Nx, 0 = max).
+    bool has_fast_forward_speed = false; int fast_forward_speed = 4;
     // [audio]
     bool has_spu_hq         = false; bool spu_hq         = false;
     bool has_audio_freq     = false; int  audio_freq     = 44100;
