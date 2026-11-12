@@ -5,6 +5,8 @@
 #include "debug_server.h"
 #include "crash_trace.h"   /* g_psx_fatal_reason */
 #include "cpu_state.h"     /* g_psx_bail_* call-contract counters */
+#include "gpu.h"           /* display start + GP0 counters for the ring */
+#include "present_ring.h"  /* present_ring_total() */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -160,6 +162,15 @@ typedef struct {
     uint64_t tcp_stall_ms;
     uint16_t t1_count;        /* Timer1/RCnt1 counter — must advance if the wait is to complete */
     uint64_t t1_irq_fired;    /* Timer1 IRQ-fire count — flat == RCnt IRQ never fires */
+    /* Display/present pipeline: tells a guest that stopped drawing (draws
+     * flat), a guest that keeps drawing into a buffer it never scans out
+     * (disp_x/disp_y stuck), and a host that stopped presenting (pres flat)
+     * apart while the guest keeps running. */
+    uint64_t presents;        /* present_ring_total(): host presents committed */
+    uint64_t gp0_draws;       /* GP0 draw primitives executed */
+    uint64_t gp0_fills;       /* GP0 fill-rect commands executed */
+    uint16_t disp_x, disp_y;  /* GP1(05h) display start in VRAM */
+    uint8_t  disp_off;        /* GP1(03h) display disabled */
 } HbRingEntry;
 static HbRingEntry s_ring[RING_CAP];
 static uint32_t    s_ring_head = 0;
@@ -582,6 +593,8 @@ static int freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
             "\"i_stat\":\"0x%08X\",\"sio_stat\":\"0x%04X\","
             "\"sio_ctrl\":\"0x%04X\",\"in_exc\":%u,\"mc_max\":%u,"
             "\"t1_count\":%u,\"t1_irq_fired\":%llu,"
+            "\"pres\":%llu,\"draws\":%llu,\"fills\":%llu,"
+            "\"disp\":[%u,%u],\"disp_off\":%u,"
             "\"tcp_ms\":%llu}%s\n",
             e->wall_clock,
             (unsigned long long)e->frame_count,
@@ -592,6 +605,9 @@ static int freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
             e->i_stat, (unsigned)e->sio_stat, (unsigned)e->sio_ctrl,
             (unsigned)e->in_exception, (unsigned)e->mc_max_state,
             (unsigned)e->t1_count, (unsigned long long)e->t1_irq_fired,
+            (unsigned long long)e->presents, (unsigned long long)e->gp0_draws,
+            (unsigned long long)e->gp0_fills,
+            (unsigned)e->disp_x, (unsigned)e->disp_y, (unsigned)e->disp_off,
             (unsigned long long)e->tcp_stall_ms,
             (i + 1 < avail) ? "," : "");
     }
@@ -760,6 +776,17 @@ static void heartbeat_write(void) {
     { uint16_t _t1c = 0; uint64_t _t1f = 0;
       timers_get_debug(1, &_t1c, NULL, NULL, &_t1f);
       re->t1_count = _t1c; re->t1_irq_fired = _t1f; }
+    {   uint64_t _nop = 0, _fill = 0, _draw = 0, _env = 0, _copy = 0;
+        GpuDisplayInfo _di;
+        gpu_get_gp0_stats(&_nop, &_fill, &_draw, &_env, &_copy);
+        gpu_get_display_info(&_di);
+        re->presents  = present_ring_total();
+        re->gp0_draws = _draw;
+        re->gp0_fills = _fill;
+        re->disp_x    = (uint16_t)_di.display_x;
+        re->disp_y    = (uint16_t)_di.display_y;
+        re->disp_off  = (uint8_t)(_di.disabled != 0);
+    }
     s_ring_head = (s_ring_head + 1) % RING_CAP;
     if (s_ring_count < RING_CAP) s_ring_count++;
 
@@ -1014,6 +1041,8 @@ static void heartbeat_write(void) {
             "\"i_stat\":\"0x%08X\",\"sio_stat\":\"0x%04X\","
             "\"sio_ctrl\":\"0x%04X\",\"in_exc\":%u,\"mc_max\":%u,"
             "\"t1_count\":%u,\"t1_irq_fired\":%llu,"
+            "\"pres\":%llu,\"draws\":%llu,\"fills\":%llu,"
+            "\"disp\":[%u,%u],\"disp_off\":%u,"
             "\"tcp_ms\":%llu}%s\n",
             e->wall_clock,
             (unsigned long long)e->frame_count,
@@ -1024,6 +1053,9 @@ static void heartbeat_write(void) {
             e->i_stat, (unsigned)e->sio_stat, (unsigned)e->sio_ctrl,
             (unsigned)e->in_exception, (unsigned)e->mc_max_state,
             (unsigned)e->t1_count, (unsigned long long)e->t1_irq_fired,
+            (unsigned long long)e->presents, (unsigned long long)e->gp0_draws,
+            (unsigned long long)e->gp0_fills,
+            (unsigned)e->disp_x, (unsigned)e->disp_y, (unsigned)e->disp_off,
             (unsigned long long)e->tcp_stall_ms,
             (i + 1 < avail) ? "," : "");
         if (m <= 0 || (size_t)(n + m) >= sizeof(buf)) break;
