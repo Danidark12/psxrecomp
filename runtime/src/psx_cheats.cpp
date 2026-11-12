@@ -315,7 +315,7 @@ static void rasterize(void) {
     for (int i = 0; i < CM_W * CM_H; i++) s_panel[i] = 0xFF0F1118u;
     fill_rect(0, 0, CM_W, 46, 0xFF171B25u);
     draw_text(24, 14, "CHEATS", 0xFFFFD24Du, 2, 0);
-    draw_text(420, 18, pt ? "F5 / SELECT+L3" : "F5 / SELECT+L3", 0xFFB8BDC8u, 1, 0);
+    draw_text(400, 18, pt ? "F4 / SELECT+QUADRADO" : "F4 / SELECT+SQUARE", 0xFFB8BDC8u, 1, 0);
 
     if (s_list.count == 0) {
         draw_wrapped(28, 80, s_list.loaded

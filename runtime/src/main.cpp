@@ -8664,24 +8664,28 @@ static void cheats_menu_handle_key(SDL_Keycode key, SDL_Scancode scancode,
     }
 }
 
+static int cheats_pad_chord_down(void) {
+    if (!p1_host_present())
+        return 0;
+    return psx_hotkey_pad_down(PSX_HOTKEY_PAD_CHEATS, 0, SDL_CONTROLLER_BUTTON_BACK,
+                               p1_host_button_down, p1_host_axis_value, nullptr);
+}
+
 static void cheats_menu_poll_nav(uint32_t now_ms) {
     static int prev_ok, prev_cancel, prev_toggle;
     static int held_dir, last_step_ms;
-    int up = 0, down = 0, ok = 0, cancel = 0;
-    SDL_GameController *h = g_players[0].handle;
-    if (h) {
-        const Sint16 ly = SDL_GameControllerGetAxis(h, SDL_CONTROLLER_AXIS_LEFTY);
-        const int dz = 16000;
-        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_UP) || ly < -dz)
-            up = 1;
-        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_DOWN) || ly > dz)
-            down = 1;
-        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_A))
-            ok = 1;
-        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_B))
-            cancel = 1;
-    }
-    const int toggle = hotkey_pad_binding_down(PSX_HOTKEY_PAD_CHEATS);
+    /* Same source as the save-state menu: the player's own mapping, so the
+     * PlayStation labels (X toggles, O closes) match their controller. */
+    uint16_t buttons = pad_buttons_for(g_players[0], 1, true);
+    uint16_t host_word;
+    uint8_t sticks[4], lt, rt;
+    if (host_pad_layer(&host_word, sticks, &lt, &rt)) buttons = host_word;
+    const int ly = p1_host_axis_value(nullptr, SDL_CONTROLLER_AXIS_LEFTY);
+    const int up = !(buttons & PAD_UP) || ly < -16000;
+    const int down = !(buttons & PAD_DOWN) || ly > 16000;
+    const int ok = !(buttons & PAD_CROSS);
+    int cancel = !(buttons & PAD_CIRCLE);
+    const int toggle = cheats_pad_chord_down();
     if (cheats_menu_ignore_toggle_release) {
         if (!toggle && !ok)
             cheats_menu_ignore_toggle_release = 0;
@@ -8712,7 +8716,7 @@ static void cheats_menu_poll_nav(uint32_t now_ms) {
 
 static void cheats_menu_poll_toggle_buttons(void) {
     static int was_down;
-    int down = hotkey_pad_binding_down(PSX_HOTKEY_PAD_CHEATS);
+    int down = cheats_pad_chord_down();
     if (down && !was_down && !psx_rewind_is_open() && !savestate_menu_open)
         cheats_menu_toggle(0);
     was_down = down;
