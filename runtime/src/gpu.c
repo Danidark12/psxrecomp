@@ -33,6 +33,7 @@
 #include "mod_runtime.h"
 #include "mod_plugins.h"
 #include "ws_scene_hold.h"
+#include "psx_cheats.h"
 #include "sio.h"
 #include "ws_cull_detect.h"
 #include "ws_cull_edge.h"
@@ -4556,6 +4557,9 @@ void gpu_vblank_tick(void) {
     /* Trusted package-selected plugins run on guest VBlank, independent of
      * host presentation, pacing, turbo, or skipped frames. */
     mod_runtime_on_vblank();
+    /* Cheats GameShark (cheats.txt): tambem no VBlank do jogo, como o
+     * cartucho real. Ver psx_cheats.cpp. */
+    psx_cheats_on_vblank();
     psx_irq_raise(0, 0); /* IRQ_VBLANK (gpu_vblank_tick) */
     if (!vblank_callback)
         return;

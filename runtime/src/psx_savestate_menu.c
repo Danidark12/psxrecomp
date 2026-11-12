@@ -1,6 +1,7 @@
 /* psx_savestate_menu.c - full-screen user save-state slot browser. */
 
 #include "psx_savestate_menu.h"
+#include "psx_cheats.h"
 
 #include "host_keymap.h"
 #include "savestate.h"
@@ -321,13 +322,18 @@ void psx_savestate_menu_note_slots_changed(void)
     s_dirty = 1;
 }
 
+/* O menu de cheats (psx_cheats.cpp) é apresentado pelo mesmo canal de
+ * imagem de tela cheia: os três apresentadores (SDL, GL, Vulkan) já sabem
+ * desenhar este painel. Os dois menus nunca ficam abertos juntos. */
 int psx_savestate_menu_needs_present(void)
 {
-    return s_open;
+    return s_open || psx_cheats_menu_needs_present();
 }
 
 int psx_savestate_menu_overlay_image(const uint32_t **pixels, int *w, int *h)
 {
+    if (!s_open && psx_cheats_menu_overlay_image(pixels, w, h))
+        return 1;
     if (!s_open) {
         if (pixels) *pixels = NULL;
         if (w) *w = 0;
