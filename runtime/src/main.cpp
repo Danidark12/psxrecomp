@@ -23,6 +23,7 @@
 #include "savestate.h"
 #include "psx_rewind.h"
 #include "psx_savestate_menu.h"
+#include "psx_cheats.h"
 #include "host_osd.h"
 #include "host_keymap.h"
 #include "png_write.h"       /* png_write_rgb — present_shot readback */
@@ -6243,6 +6244,136 @@ static void savestate_menu_poll_toggle_buttons(void) {
     was_down = down;
 }
 
+/* ---- Menu de cheats (F5 / Select+L3) ------------------------------------
+ * Mesma mecânica do menu de saves: o jogo fica congelado enquanto o menu está
+ * aberto, a imagem sai pelo canal de overlay de tela cheia, e cada troca é
+ * gravada em cheats.txt (psx_cheats.cpp). */
+#define PSX_HOTKEY_PAD_SELECT_L3 \
+    PSX_HOTKEY_PAD_BUTTON_COMBO(((uint32_t)1u << SDL_CONTROLLER_BUTTON_BACK) | \
+                                ((uint32_t)1u << SDL_CONTROLLER_BUTTON_LEFTSTICK))
+static int cheats_menu_open = 0;
+static int cheats_menu_sel = 0;
+static int cheats_menu_ignore_toggle_release = 0;
+static SDL_Keycode cheats_menu_open_key = 0;
+
+static void cheats_menu_sync(void) {
+    psx_cheats_menu_set_state(cheats_menu_open, cheats_menu_sel);
+    cheats_menu_sel = psx_cheats_menu_selected();
+}
+
+static void cheats_menu_close(void) {
+    cheats_menu_open = 0;
+    cheats_menu_sync();
+}
+
+static void cheats_menu_toggle(SDL_Keycode opened_by_key) {
+    if (psx_rewind_is_open() || savestate_menu_open)
+        return;
+    if (cheats_menu_open) {
+        cheats_menu_close();
+        return;
+    }
+    if (psx_netplay_active()) {
+        host_osd_push("Cheats: netplay", 1500);
+        return;
+    }
+    cheats_menu_open = 1;
+    cheats_menu_ignore_toggle_release = 1;
+    cheats_menu_open_key = opened_by_key;
+    cheats_menu_sync();
+}
+
+static void cheats_menu_move(int delta) {
+    const int n = psx_cheats_count();
+    if (n <= 0) return;
+    cheats_menu_sel = ((cheats_menu_sel + delta) % n + n) % n;
+    cheats_menu_sync();
+}
+
+static void cheats_menu_toggle_selected(void) {
+    char msg[160];
+    msg[0] = 0;
+    psx_cheats_toggle(cheats_menu_sel, msg, (int)sizeof(msg));
+    if (msg[0]) host_osd_push(msg, 1500);
+    cheats_menu_sync();
+}
+
+static void cheats_menu_handle_key(SDL_Keycode key, SDL_Scancode scancode,
+                                   int mod, int repeat) {
+    if (cheats_menu_open_key && key == cheats_menu_open_key)
+        return;
+    if (!repeat &&
+        (host_keymap_match_event(HOST_KEYMAP_CHEATS_MENU, (int)key,
+                                 (int)scancode, mod) ||
+         key == SDLK_ESCAPE || key == SDLK_BACKSPACE)) {
+        cheats_menu_close();
+    } else if (key == SDLK_UP || key == SDLK_LEFT) {
+        cheats_menu_move(-1);
+    } else if (key == SDLK_DOWN || key == SDLK_RIGHT) {
+        cheats_menu_move(+1);
+    } else if (key == SDLK_PAGEUP) {
+        cheats_menu_move(-10);
+    } else if (key == SDLK_PAGEDOWN) {
+        cheats_menu_move(+10);
+    } else if (!repeat && (key == SDLK_RETURN || key == SDLK_SPACE)) {
+        cheats_menu_toggle_selected();
+    }
+}
+
+static void cheats_menu_poll_nav(uint32_t now_ms) {
+    static int prev_ok, prev_cancel, prev_toggle;
+    static int held_dir, last_step_ms;
+    int up = 0, down = 0, ok = 0, cancel = 0;
+    SDL_GameController *h = g_players[0].handle;
+    if (h) {
+        const Sint16 ly = SDL_GameControllerGetAxis(h, SDL_CONTROLLER_AXIS_LEFTY);
+        const int dz = 16000;
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_UP) || ly < -dz)
+            up = 1;
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_DOWN) || ly > dz)
+            down = 1;
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_A))
+            ok = 1;
+        if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_B))
+            cancel = 1;
+    }
+    const int toggle = hotkey_pad_binding_down(PSX_HOTKEY_PAD_SELECT_L3);
+    if (cheats_menu_ignore_toggle_release) {
+        if (!toggle && !ok)
+            cheats_menu_ignore_toggle_release = 0;
+        prev_ok = ok;
+    } else if (toggle && !prev_toggle) {
+        cancel = 1;
+    }
+    prev_toggle = toggle;
+    if (ok && !prev_ok)
+        cheats_menu_toggle_selected();
+    if (cancel && !prev_cancel)
+        cheats_menu_close();
+    prev_ok = ok;
+    prev_cancel = cancel;
+    if (!cheats_menu_open)
+        return;
+    const int dir = down ? +1 : up ? -1 : 0;
+    if (!dir) {
+        held_dir = 0;
+        return;
+    }
+    if (dir != held_dir || (int32_t)(now_ms - (uint32_t)last_step_ms) >= 160) {
+        cheats_menu_move(dir);
+        held_dir = dir;
+        last_step_ms = (int)now_ms;
+    }
+}
+
+static void cheats_menu_poll_toggle_buttons(void) {
+    static int was_down;
+    int down = hotkey_pad_binding_down(PSX_HOTKEY_PAD_SELECT_L3);
+    if (down && !was_down && !psx_rewind_is_open() && !savestate_menu_open)
+        cheats_menu_toggle(0);
+    was_down = down;
+}
+
 /* Latched fast-forward: [KeyMap] TurboToggle (default F9) or the [hotkeys]
  * fast_forward_toggle_pad shortcut flips this; while set, the manual
  * fast-forward block runs exactly as if Turbo were held. Cleared by the next
@@ -6419,6 +6550,52 @@ static void savestate_menu_host_pause_loop(void) {
         SDL_Delay(8);
     }
     /* Swallow the close press; a just-queued save must not snapshot it. */
+    savestate_input_guard_arm();
+}
+
+/* Congela o jogo enquanto o menu de cheats está aberto. */
+static void cheats_menu_host_pause_loop(void) {
+    while (cheats_menu_open) {
+        SDL_Event ev;
+        while (SDL_PollEvent(&ev)) {
+            if (ev.type == SDL_QUIT) {
+                psx_crash_trace_set_exit_origin("sdl_window_close");
+                shutdown_runtime();
+                std::exit(0);
+            } else if (ev.type == SDL_CONTROLLERDEVICEADDED) {
+                refresh_player_devices();
+            } else if (ev.type == SDL_CONTROLLERDEVICEREMOVED) {
+                close_controller();
+                refresh_player_devices();
+            } else if (ev.type == SDL_KEYDOWN) {
+#if defined(PSX_SDL3)
+                const SDL_Keymod mod = ev.key.mod;
+                const SDL_Keycode key = ev.key.key;
+                const SDL_Scancode scancode = ev.key.scancode;
+                const int repeat = ev.key.repeat ? 1 : 0;
+#else
+                const Uint16 mod = ev.key.keysym.mod;
+                const SDL_Keycode key = ev.key.keysym.sym;
+                const SDL_Scancode scancode = ev.key.keysym.scancode;
+                const int repeat = ev.key.repeat ? 1 : 0;
+#endif
+                cheats_menu_handle_key(key, scancode, (int)mod, repeat);
+            } else if (ev.type == SDL_KEYUP) {
+#if defined(PSX_SDL3)
+                const SDL_Keycode key = ev.key.key;
+#else
+                const SDL_Keycode key = ev.key.keysym.sym;
+#endif
+                if (cheats_menu_open_key == key)
+                    cheats_menu_open_key = 0;
+            }
+        }
+        cheats_menu_poll_nav((uint32_t)SDL_GetTicks());
+        rewind_pause_present();
+        starvation_watchdog_heartbeat();
+        SDL_Delay(8);
+    }
+    /* Não deixa o botão que fechou o menu vazar para o jogo. */
     savestate_input_guard_arm();
 }
 
@@ -6635,6 +6812,12 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                                  (int)mod)) {
                     savestate_menu_toggle(key);
                 }
+                else if (!key_repeat &&
+                         host_keymap_match_event(HOST_KEYMAP_CHEATS_MENU,
+                                                 (int)key, (int)scancode,
+                                                 (int)mod)) {
+                    cheats_menu_toggle(key);
+                }
                 else if (key == SDLK_c && (mod & KMOD_CTRL)) {
                     std::fprintf(stdout, "[DEBUG] Forzando reinserción de CD...\n");
                     debug_force_cd_reinsert();
@@ -6704,12 +6887,15 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
             }
         }
         savestate_menu_poll_toggle_buttons();
+        cheats_menu_poll_toggle_buttons();
         rewind_poll_toggle_buttons();
         fast_forward_toggle_poll_buttons();
         psx_rewind_note_frame();
         psx_rewind_present_tick((uint32_t)SDL_GetTicks());
         if (savestate_menu_open)
             savestate_menu_host_pause_loop();
+        if (cheats_menu_open)
+            cheats_menu_host_pause_loop();
         if (psx_rewind_is_open())
             rewind_host_pause_loop();
     }
