@@ -11,6 +11,7 @@
 #include "starvation_ring.h"
 #include "gpu.h"           /* display start + GP0 counters for the ring */
 #include "present_ring.h"  /* present_ring_total() */
+#include "dma.h"           /* GPU OT DMA counters for the ring */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -175,6 +176,17 @@ typedef struct {
     uint64_t gp0_fills;       /* GP0 fill-rect commands executed */
     uint16_t disp_x, disp_y;  /* GP1(05h) display start in VRAM */
     uint8_t  disp_off;        /* GP1(03h) display disabled */
+    /* GPU ordering-table DMA (channel 2 linked list): a guest that still
+     * kicks the OT each frame but with no primitives shows starts/completes
+     * advancing with nodes_last tiny; a guest that stopped submitting shows
+     * them flat. */
+    uint64_t ot_starts, ot_completes;
+    uint32_t ot_nodes_last;
+    uint8_t  ot_active;
+    /* Root counter 2 (sysclk or sysclk/8): animation pacing clock. */
+    uint16_t t2_count;
+    uint32_t t2_mode;
+    uint64_t t2_irq_fired;
 } HbRingEntry;
 static HbRingEntry s_ring[RING_CAP];
 static uint32_t    s_ring_head = 0;
@@ -641,6 +653,8 @@ static int freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
             "\"t1_count\":%u,\"t1_irq_fired\":%llu,"
             "\"pres\":%llu,\"draws\":%llu,\"fills\":%llu,"
             "\"disp\":[%u,%u],\"disp_off\":%u,"
+            "\"ot\":[%llu,%llu,%u,%u],"
+            "\"t2\":[%u,\"0x%04X\",%llu],"
             "\"tcp_ms\":%llu}%s\n",
             e->wall_clock,
             (unsigned long long)e->frame_count,
@@ -654,6 +668,10 @@ static int freeze_dump_write(long long wall, uint64_t frame, uint64_t cyc,
             (unsigned long long)e->presents, (unsigned long long)e->gp0_draws,
             (unsigned long long)e->gp0_fills,
             (unsigned)e->disp_x, (unsigned)e->disp_y, (unsigned)e->disp_off,
+            (unsigned long long)e->ot_starts, (unsigned long long)e->ot_completes,
+            (unsigned)e->ot_nodes_last, (unsigned)e->ot_active,
+            (unsigned)e->t2_count, (unsigned)e->t2_mode,
+            (unsigned long long)e->t2_irq_fired,
             (unsigned long long)e->tcp_stall_ms,
             (i + 1 < avail) ? "," : "");
     }
@@ -841,6 +859,17 @@ static void heartbeat_write(void) {
         re->disp_x    = (uint16_t)_di.display_x;
         re->disp_y    = (uint16_t)_di.display_y;
         re->disp_off  = (uint8_t)(_di.disabled != 0);
+    }
+    {   DMAGpuOtStats _ot;
+        memset(&_ot, 0, sizeof(_ot));
+        dma_debug_get_gpu_ot_stats(&_ot);
+        re->ot_starts     = _ot.starts;
+        re->ot_completes  = _ot.completes;
+        re->ot_nodes_last = _ot.nodes_last;
+        re->ot_active     = _ot.active;
+        uint16_t _c = 0; uint32_t _m = 0; uint64_t _f = 0;
+        timers_get_debug(2, &_c, NULL, &_m, &_f);
+        re->t2_count = _c; re->t2_mode = _m; re->t2_irq_fired = _f;
     }
     s_ring_head = (s_ring_head + 1) % RING_CAP;
     if (s_ring_count < RING_CAP) s_ring_count++;
@@ -1097,6 +1126,8 @@ static void heartbeat_write(void) {
             "\"t1_count\":%u,\"t1_irq_fired\":%llu,"
             "\"pres\":%llu,\"draws\":%llu,\"fills\":%llu,"
             "\"disp\":[%u,%u],\"disp_off\":%u,"
+            "\"ot\":[%llu,%llu,%u,%u],"
+            "\"t2\":[%u,\"0x%04X\",%llu],"
             "\"tcp_ms\":%llu}%s\n",
             e->wall_clock,
             (unsigned long long)e->frame_count,
@@ -1110,6 +1141,10 @@ static void heartbeat_write(void) {
             (unsigned long long)e->presents, (unsigned long long)e->gp0_draws,
             (unsigned long long)e->gp0_fills,
             (unsigned)e->disp_x, (unsigned)e->disp_y, (unsigned)e->disp_off,
+            (unsigned long long)e->ot_starts, (unsigned long long)e->ot_completes,
+            (unsigned)e->ot_nodes_last, (unsigned)e->ot_active,
+            (unsigned)e->t2_count, (unsigned)e->t2_mode,
+            (unsigned long long)e->t2_irq_fired,
             (unsigned long long)e->tcp_stall_ms,
             (i + 1 < avail) ? "," : "");
         if (m <= 0 || (size_t)(n + m) >= sizeof(buf)) break;
