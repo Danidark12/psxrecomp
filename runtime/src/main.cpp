@@ -6493,12 +6493,6 @@ static const PsxMenuOption kIngameOptions[] = {
       "SUAVIZAR LA IMAGEN",
       "ACTIVADO: LA IMAGEN FINAL SE AMPLIA CON FILTRO LINEAL. DESACTIVADO: SE AMPLIA SIN FILTRO (PIXELES CUADRADOS).",
       ingame_opt_smooth_value, ingame_opt_smooth_activate },
-    { "FPS DO MONITOR (INTERPOLACAO)", "MONITOR FPS (INTERPOLATION)",
-      "X TROCA: PADRAO (60), MONITOR (DETECTA OS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MISTURA QUADROS PARA SUAVIZAR; O JOGO CONTINUA NA VELOCIDADE NORMAL. USE O VALOR DO SEU MONITOR.",
-      "X CYCLES: DEFAULT (60), MONITOR (DETECTS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. BLENDS FRAMES FOR SMOOTHNESS; GAME SPEED IS UNCHANGED. USE YOUR MONITOR RATE.",
-      "FPS DEL MONITOR (INTERPOLACION)",
-      "X CAMBIA: POR DEFECTO (60), MONITOR (DETECTA LOS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MEZCLA FOTOGRAMAS PARA SUAVIZAR; EL JUEGO SIGUE A VELOCIDAD NORMAL. USA EL VALOR DE TU MONITOR.",
-      ingame_opt_interp_value, ingame_opt_interp_activate },
     { "TROCAR DISCO", "CHANGE DISC",
       "TROCA PARA O OUTRO DISCO, COMO ABRIR E FECHAR A TAMPA DO CONSOLE. O JOGO TAMBEM TROCA SOZINHO QUANDO PEDE OUTRO DISCO. O OUTRO DISCO PRECISA ESTAR NA MESMA PASTA, COM O MESMO NOME (DISC 1 / DISC 2).",
       "SWITCHES TO THE OTHER DISC, LIKE OPENING AND CLOSING THE CONSOLE LID. THE GAME ALSO SWITCHES BY ITSELF WHEN IT ASKS FOR ANOTHER DISC. THE OTHER DISC MUST BE IN THE SAME FOLDER WITH THE SAME NAME (DISC 1 / DISC 2).",
@@ -11495,7 +11489,6 @@ namespace {
         gi->locked_pad_mode = locked_pad_mode_i;
         gi->lock_device = ctrl_lock_device_b ? 1 : 0;
         gi->aspect_mask = 0x7;   /* 4:3, 16:9, 21:9 */
-        gi->has_frame_interp = 1;
         gi->renderer_labels = kPsxRendererLabels;
         gi->num_renderers = vulkan_offered_b ? 3 : 2;
         gi->settings_bindings = 1;
@@ -11797,7 +11790,7 @@ int main(int argc, char** argv) {
      * activation plugins apply them after launcher/settings resolution. */
     constexpr bool ws_offered = true;
     constexpr bool ws_ultrawide_offered = true;
-    constexpr bool frame_interpolation_offered = true;
+    constexpr bool frame_interpolation_offered = false;
     constexpr bool skip_fmv_offered = false;
     /* Load acceleration is likewise mod-owned (Fast Loading / CD Speed). The
      * former game.toml `offer_turbo_loads` opt-out is deprecated and ignored:
@@ -13631,8 +13624,9 @@ int main(int argc, char** argv) {
                 fast_boot = seed.fast_boot;
                 bios_hle  = seed.bios_hle;
                 g_fullscreen      = seed.fullscreen;
-                g_frame_interpolation = seed.frame_interpolation ? 1 : 0;
-                g_frame_interpolation_fps = seed.frame_interpolation_fps;
+                /* FPS fixo em 60: interpolação não é oferecida. */
+                g_frame_interpolation = 0;
+                g_frame_interpolation_fps = 0;
                 g_video_aspect_num = seed.aspect_num;
                 g_video_aspect_den = seed.aspect_den;
                 g_audio_freq      = seed.audio_freq;
@@ -15552,8 +15546,8 @@ soft_return_lobby:
             if (skip_fmv_offered)     g_auto_skip_fmv = ls.auto_skip_fmv ? 1 : 0;
             if (turbo_loads_offered)  g_turbo_loads_enabled = ls.turbo_loads ? 1 : 0;
             g_fullscreen = ls.fullscreen != 0;
-            g_frame_interpolation = ls.frame_interp ? 1 : 0;
-            g_frame_interpolation_fps = ls.frame_interp_fps;
+            g_frame_interpolation = 0;   /* FPS fixo em 60 */
+            g_frame_interpolation_fps = 0;
             g_audio_freq = ls.audio_freq;
             g_audio_spu_hq = ls.spu_hq != 0;
             if (ls.rewind_depth > 0) {
