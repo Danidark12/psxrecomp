@@ -6343,7 +6343,7 @@ static void ingame_opt_interp_value(char *out, int cap, int pt) {
     if (!g_gl_active)
         std::snprintf(out, cap, "%s", pt ? "SO NO OPENGL" : "OPENGL ONLY");
     else if (!g_frame_interpolation)
-        std::snprintf(out, cap, "%s", pt ? "DESLIGADO" : "OFF");
+        std::snprintf(out, cap, "%s", pt ? "PADRAO (60 FPS)" : "DEFAULT (60 FPS)");
     else if (g_frame_interpolation_fps > 0)
         std::snprintf(out, cap, "%d FPS", g_frame_interpolation_fps);
     else if (g_host_refresh_hz > 0.0)
@@ -6380,7 +6380,7 @@ static void ingame_opt_interp_activate(char *msg, int cap) {
     apply_present_cadence();
     ingame_options_persist();
     if (!g_frame_interpolation)
-        std::snprintf(msg, cap, "Monitor FPS: off");
+        std::snprintf(msg, cap, "Monitor FPS: default (60)");
     else if (g_frame_interpolation_fps > 0)
         std::snprintf(msg, cap, "Monitor FPS: %d", g_frame_interpolation_fps);
     else
@@ -6412,8 +6412,8 @@ static const PsxMenuOption kIngameOptions[] = {
       "ON: THE FINAL PICTURE IS SCALED WITH A LINEAR FILTER. OFF: SCALED WITHOUT FILTERING (SQUARE PIXELS).",
       ingame_opt_smooth_value, ingame_opt_smooth_activate },
     { "FPS DO MONITOR (INTERPOLACAO)", "MONITOR FPS (INTERPOLATION)",
-      "X TROCA: DESLIGADO, MONITOR (DETECTA OS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MISTURA QUADROS PARA SUAVIZAR; O JOGO CONTINUA NA VELOCIDADE NORMAL. USE O VALOR DO SEU MONITOR.",
-      "X CYCLES: OFF, MONITOR (DETECTS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. BLENDS FRAMES FOR SMOOTHNESS; GAME SPEED IS UNCHANGED. USE YOUR MONITOR RATE.",
+      "X TROCA: PADRAO (60), MONITOR (DETECTA OS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MISTURA QUADROS PARA SUAVIZAR; O JOGO CONTINUA NA VELOCIDADE NORMAL. USE O VALOR DO SEU MONITOR.",
+      "X CYCLES: DEFAULT (60), MONITOR (DETECTS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. BLENDS FRAMES FOR SMOOTHNESS; GAME SPEED IS UNCHANGED. USE YOUR MONITOR RATE.",
       ingame_opt_interp_value, ingame_opt_interp_activate },
     { "VOLTAR AO LAUNCHER", "BACK TO THE LAUNCHER",
       "FECHA O JOGO E ABRE O LAUNCHER. SALVE ANTES: O PROGRESSO NAO SALVO E PERDIDO.",
