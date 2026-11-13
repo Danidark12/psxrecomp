@@ -6393,6 +6393,77 @@ static void ingame_opt_interp_activate(char *msg, int cap) {
                       (int)(g_host_refresh_hz + 0.5));
 }
 
+/* ---- Troca de disco em jogo ----------------------------------------------
+ * g_disc_set[i] é o caminho de cada disco do jogo (vazio se não achado);
+ * g_disc_current é o índice (base 0) do disco na bandeja. */
+static std::vector<std::string> g_disc_set;
+static int g_disc_current = 0;
+
+static int disc_other_index(void) {
+    const int n = (int)g_disc_set.size();
+    if (n < 2) return -1;
+    for (int k = 1; k < n; ++k) {
+        const int i = (g_disc_current + k) % n;
+        if (!g_disc_set[(size_t)i].empty()) return i;
+    }
+    return -1;
+}
+
+static int disc_swap_to(int idx, char *msg, int cap) {
+    const int lang = psx_ui_lang();
+    if (idx < 0 || idx >= (int)g_disc_set.size() || g_disc_set[(size_t)idx].empty()) {
+        if (msg) std::snprintf(msg, cap, "%s",
+            ingame_tr(lang, "Other disc not found next to this one",
+                      "Outro disco nao encontrado na mesma pasta",
+                      "No se encontro el otro disco en la misma carpeta"));
+        return 0;
+    }
+    if (psx_netplay_active() || !cdrom_swap_disc(g_disc_set[(size_t)idx].c_str())) {
+        if (msg) std::snprintf(msg, cap, "%s",
+            ingame_tr(lang, "Could not change the disc", "Nao foi possivel trocar o disco",
+                      "No se pudo cambiar el disco"));
+        return 0;
+    }
+    g_disc_current = idx;
+    savestate_set_disc_scope(idx + 1);
+    if (msg) std::snprintf(msg, cap, ingame_tr(lang, "Disc %d inserted", "Disco %d inserido",
+                                               "Disco %d insertado"), idx + 1);
+    return 1;
+}
+
+static void ingame_opt_disc_value(char *out, int cap, int lang) {
+    if (g_disc_set.size() < 2) { if (cap > 0) out[0] = 0; return; }
+    std::snprintf(out, cap, ingame_tr(lang, "DISC %d", "DISCO %d", "DISCO %d"),
+                  g_disc_current + 1);
+}
+static void ingame_opt_disc_activate(char *msg, int cap) {
+    if (g_disc_set.size() < 2) { if (cap > 0) msg[0] = 0; return; }
+    const int other = (g_disc_current + 1) % (int)g_disc_set.size();
+    disc_swap_to(g_disc_set[(size_t)other].empty() ? -1 : other, msg, cap);
+}
+
+/* Chamado a cada quadro: se o jogo está parado pedindo outro disco (só
+ * consulta o estado do drive), troca sozinho para o outro disco do jogo. */
+static void disc_prompt_poll(void) {
+    static uint64_t last_action_ms = 0;
+    if (g_disc_set.size() < 2 || psx_netplay_active()) return;
+    if (cdrom_disc_prompt_seconds() < 3.0) return;
+    const uint64_t now = SDL_GetTicks64();
+    if (last_action_ms && now - last_action_ms < 20000) return;
+    last_action_ms = now;
+    char msg[96];
+    const int other = disc_other_index();
+    if (other >= 0 && disc_swap_to(other, msg, sizeof(msg))) {
+        host_osd_push(msg, 3000);
+    } else {
+        const int lang = psx_ui_lang();
+        host_osd_push(ingame_tr(lang,
+            "The game asks for another disc: pick it in the launcher",
+            "O jogo pediu outro disco: escolha-o no launcher",
+            "El juego pide otro disco: eligelo en el launcher"), 5000);
+    }
+}
+
 static int g_ingame_launcher_requested = 0;
 static void ingame_opt_launcher_value(char *out, int cap, int pt) {
     (void)pt;
@@ -6428,6 +6499,12 @@ static const PsxMenuOption kIngameOptions[] = {
       "FPS DEL MONITOR (INTERPOLACION)",
       "X CAMBIA: POR DEFECTO (60), MONITOR (DETECTA LOS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MEZCLA FOTOGRAMAS PARA SUAVIZAR; EL JUEGO SIGUE A VELOCIDAD NORMAL. USA EL VALOR DE TU MONITOR.",
       ingame_opt_interp_value, ingame_opt_interp_activate },
+    { "TROCAR DISCO", "CHANGE DISC",
+      "TROCA PARA O OUTRO DISCO, COMO ABRIR E FECHAR A TAMPA DO CONSOLE. O JOGO TAMBEM TROCA SOZINHO QUANDO PEDE OUTRO DISCO. O OUTRO DISCO PRECISA ESTAR NA MESMA PASTA, COM O MESMO NOME (DISC 1 / DISC 2).",
+      "SWITCHES TO THE OTHER DISC, LIKE OPENING AND CLOSING THE CONSOLE LID. THE GAME ALSO SWITCHES BY ITSELF WHEN IT ASKS FOR ANOTHER DISC. THE OTHER DISC MUST BE IN THE SAME FOLDER WITH THE SAME NAME (DISC 1 / DISC 2).",
+      "CAMBIAR DISCO",
+      "CAMBIA AL OTRO DISCO, COMO ABRIR Y CERRAR LA TAPA DE LA CONSOLA. EL JUEGO TAMBIEN CAMBIA SOLO CUANDO PIDE OTRO DISCO. EL OTRO DISCO DEBE ESTAR EN LA MISMA CARPETA, CON EL MISMO NOMBRE (DISC 1 / DISC 2).",
+      ingame_opt_disc_value, ingame_opt_disc_activate },
     { "VOLTAR AO LAUNCHER", "BACK TO THE LAUNCHER",
       "FECHA O JOGO E ABRE O LAUNCHER. SALVE ANTES: O PROGRESSO NAO SALVO E PERDIDO.",
       "CLOSES THE GAME AND OPENS THE LAUNCHER. SAVE FIRST: UNSAVED PROGRESS IS LOST.",
@@ -7167,6 +7244,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         savestate_menu_poll_toggle_buttons();
         cheats_menu_poll_toggle_buttons();
         quick_hotkeys_poll_buttons();
+        disc_prompt_poll();
         rewind_poll_toggle_buttons();
         fast_forward_toggle_poll_buttons();
         psx_rewind_note_frame();
@@ -14012,6 +14090,47 @@ session_reboot:
         std::fprintf(stdout, "psxrecomp: SPU float-shadow enabled (verified-enhancement)\n");
     spu_init();
     cdrom_init(disc_path_str.empty() ? NULL : disc_path_str.c_str());
+    /* Discos do jogo para a troca em jogo: o montado e os irmãos com o mesmo
+     * nome trocando só o número ("(Disc 1)" -> "(Disc 2)"), ou o do roster. */
+    g_disc_set.clear();
+    g_disc_current = 0;
+    if (game_discs.size() > 1 && mod_disc.empty() && !disc_path_str.empty()) {
+        g_disc_current = std::min(std::max(selected_disc_index, 1),
+                                  (int)game_discs.size()) - 1;
+        const std::filesystem::path cur(disc_path_str);
+        const std::string name = cur.filename().string();
+        const std::string cur_tag = "Disc " + std::to_string(g_disc_current + 1);
+        std::string lname = name;
+        for (auto& ch : lname) ch = (char)std::tolower((unsigned char)ch);
+        std::string lcur = cur_tag;
+        for (auto& ch : lcur) ch = (char)std::tolower((unsigned char)ch);
+        const size_t at = lname.rfind(lcur);
+        for (size_t i = 0; i < game_discs.size(); ++i) {
+            std::string found;
+            if ((int)i == g_disc_current) {
+                found = disc_path_str;
+            } else {
+                std::vector<std::filesystem::path> tries;
+                if (at != std::string::npos) {
+                    std::string sib = name;
+                    sib.replace(at, cur_tag.size(), "Disc " + std::to_string(i + 1));
+                    std::filesystem::path p = cur.parent_path() / sib;
+                    tries.push_back(p);
+                    tries.push_back(std::filesystem::path(p).replace_extension(".cue"));
+                    tries.push_back(std::filesystem::path(p).replace_extension(".bin"));
+                }
+                tries.push_back(game_discs[i]);
+                for (const auto& t : tries) {
+                    std::error_code ec;
+                    if (!t.empty() && std::filesystem::is_regular_file(t, ec)) {
+                        found = t.string();
+                        break;
+                    }
+                }
+            }
+            g_disc_set.push_back(found);
+        }
+    }
 
     /* A disc was requested but nothing mounted. cdrom_init() is non-fatal here
      * (BIOS-only targets run with an empty drive on purpose), so without this

@@ -2050,7 +2050,34 @@ static int pause_complete_delay_cycles(void) {
     return (int)cycles;
 }
 
+/* Disc-change prompt detector. A game that wants another disc keeps polling
+ * GetStat (0x01) and nothing else until the lid opens; normal play issues no
+ * long GetStat-only runs. Host-side observation only: nothing here changes
+ * what the guest sees. */
+static uint64_t s_getstat_run_start;
+static uint64_t s_getstat_run_last;
+static uint32_t s_getstat_run_count;
+
+static void note_command_for_disc_prompt(uint8_t cmd) {
+    if (cmd != 0x01) {
+        s_getstat_run_count = 0;
+        return;
+    }
+    if (s_getstat_run_count == 0) s_getstat_run_start = psx_cycle_count;
+    s_getstat_run_last = psx_cycle_count;
+    s_getstat_run_count++;
+}
+
+/* Seconds the guest has been polling GetStat only (0 when not doing so). */
+double cdrom_disc_prompt_seconds(void) {
+    const uint64_t hz = 33868800ull;
+    if (s_getstat_run_count < 200) return 0.0;
+    if (psx_cycle_count - s_getstat_run_last > hz / 2) return 0.0;   /* run ended */
+    return (double)(s_getstat_run_last - s_getstat_run_start) / (double)hz;
+}
+
 static void exec_command(uint8_t cmd) {
+    note_command_for_disc_prompt(cmd);
 #if !defined(PSX_NO_DEBUG_TOOLS) && !defined(_WIN32)
     /* Self-stop trap: PSX_CD_TRAP_CMD=<byte> makes the process SIGSTOP
      * itself the moment that CD command dispatches, so a debugger can
@@ -3470,6 +3497,34 @@ int cdrom_snapshot_read(const uint8_t *p, uint32_t len) {
     } else if (iso_handle && (stat_reg & CDSTAT_SHELL)) {
         s_lid.shell_open_latched = 1;
     }
+    return 1;
+}
+
+/* Swap the mounted image for another disc of the set, as a player would:
+ * open the lid, change the disc, close it two seconds later. Returns 0 (and
+ * leaves the current disc mounted) when the new image cannot be opened. */
+int cdrom_swap_disc(const char* path) {
+    if (!path || !path[0]) return 0;
+    void* next = iso_open(path);
+    if (!next) return 0;
+    stop_read_stream();
+    stop_cdda_playback();
+    xa_reset_decode();
+    spu_cd_audio_reset();
+    if (iso_handle) iso_close(iso_handle);
+    iso_handle = next;
+    last_valid_subq_available = 0;
+    subq_replacements_active = iso_has_subq_replacements(iso_handle);
+    if (subq_replacements_active) update_last_valid_subq(0);
+    s_getstat_run_count = 0;
+
+    stat_reg = CDSTAT_ERROR | CDSTAT_SHELL;
+    cdrom_clear_pending_dataready();
+    cdrom_lid_begin_open(&s_lid, psx_cycle_count);
+    s_lid_irq_pending = 1;
+    present_lid_open_irq_if_ready();
+    trace_cdrom('O', 0, (uint32_t)CDROM_LID_CLOSE_DELAY_CYCLES,
+                (uint32_t)(CDROM_LID_CLOSE_DELAY_CYCLES >> 32));
     return 1;
 }
 
