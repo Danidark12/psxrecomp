@@ -27,6 +27,8 @@ typedef struct PsxMenuOption {
 void psx_cheats_menu_set_options(const PsxMenuOption *opts, int count);
 /* 0 = menu de cheats, 1 = menu de opções (mesma tela, listas separadas). */
 void psx_cheats_menu_set_mode(int options);
+/* Idioma da interface (o do launcher): 0 = inglês, 1 = português, 2 = espanhol. */
+int psx_ui_lang(void);
 
 void psx_cheats_menu_set_state(int open, int selected);
 int  psx_cheats_menu_selected(void);
