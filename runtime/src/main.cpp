@@ -6261,6 +6261,138 @@ static void savestate_menu_poll_toggle_buttons(void) {
 #define PSX_HOTKEY_PAD_SELECT_L3 \
     PSX_HOTKEY_PAD_BUTTON_COMBO(((uint32_t)1u << SDL_CONTROLLER_BUTTON_BACK) | \
                                 ((uint32_t)1u << SDL_CONTROLLER_BUTTON_LEFTSTICK))
+#define PSX_HOTKEY_PAD_SELECT_SQUARE \
+    PSX_HOTKEY_PAD_BUTTON_COMBO(((uint32_t)1u << SDL_CONTROLLER_BUTTON_BACK) | \
+                                ((uint32_t)1u << SDL_CONTROLLER_BUTTON_X))
+/* ---- Opções trocáveis em jogo (menu próprio: F4 / Select+Quadrado) ----
+ * Tudo aqui é só apresentação: filtro, proporção e interpolação mudam como a
+ * imagem chega na tela, nunca o tempo do jogo. Cada troca é gravada em
+ * settings.toml, então o launcher mostra o mesmo valor depois. */
+static void ingame_options_persist(void);
+extern "C" int psx_relaunch_launcher(void);
+
+static void ingame_opt_texfilter_value(char *out, int cap, int pt) {
+    (void)pt;
+    std::snprintf(out, cap, "%s", g_video_texfilter ? "BILINEAR" : "NEAREST");
+}
+static void ingame_opt_texfilter_activate(char *msg, int cap) {
+    g_video_texfilter = g_video_texfilter ? 0 : 1;
+    gr_set_texture_filter(g_video_texfilter);
+    ingame_options_persist();
+    std::snprintf(msg, cap, "Texture filter: %s",
+                  g_video_texfilter ? "bilinear" : "nearest");
+}
+
+static void ingame_opt_smooth_value(char *out, int cap, int pt) {
+    std::snprintf(out, cap, "%s", g_video_aa ? (pt ? "LIGADO" : "ON")
+                                             : (pt ? "DESLIGADO" : "OFF"));
+}
+static void ingame_opt_smooth_activate(char *msg, int cap) {
+    g_video_aa = !g_video_aa;
+    if (sdl_texture)
+        SDL_SetTextureScaleMode(sdl_texture, g_video_aa ? SDL_ScaleModeLinear
+                                                        : SDL_ScaleModeNearest);
+    ingame_options_persist();
+    std::snprintf(msg, cap, "Screen smoothing: %s", g_video_aa ? "on" : "off");
+}
+
+static void ingame_opt_aspect_value(char *out, int cap, int pt) {
+    (void)pt;
+    std::snprintf(out, cap, "%d:%d", g_video_aspect_num, g_video_aspect_den);
+}
+static void ingame_opt_aspect_activate(char *msg, int cap) {
+    int num = 16, den = 9;
+    if (g_video_aspect_num == 16 && g_video_aspect_den == 9) { num = 21; den = 9; }
+    else if (g_video_aspect_num * 3 != g_video_aspect_den * 4) { num = 4; den = 3; }
+    g_ws_adaptive_view = false;
+    g_video_aspect_num = num;
+    g_video_aspect_den = den;
+    gl_renderer_set_display_aspect(num, den);
+    if (sdl_renderer) {
+        g_logical_w = 480 * num * g_video_scale / den;
+        SDL_RenderSetLogicalSize(sdl_renderer, g_logical_w, 480 * g_video_scale);
+    }
+    /* Em janela, a janela acompanha a proporção (mesma altura). Em tela cheia
+     * a imagem só ganha ou perde as barras laterais. */
+    if (sdl_window &&
+        !(SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_FULLSCREEN)) {
+        int w = 0, h = 0;
+        SDL_GetWindowSize(sdl_window, &w, &h);
+        if (h > 0) {
+            int nw = h * num / den, nh = h;
+            clamp_window_aspect(&nw, &nh, num, den);
+            SDL_SetWindowSize(sdl_window, nw, nh);
+            SDL_SetWindowPosition(sdl_window, SDL_WINDOWPOS_CENTERED,
+                                  SDL_WINDOWPOS_CENTERED);
+        }
+    }
+    refresh_widescreen_projection();
+    ingame_options_persist();
+    std::snprintf(msg, cap, "Aspect: %d:%d", num, den);
+}
+
+static void ingame_opt_interp_value(char *out, int cap, int pt) {
+    if (!g_gl_active)
+        std::snprintf(out, cap, "%s", pt ? "SO NO OPENGL" : "OPENGL ONLY");
+    else if (!g_frame_interpolation)
+        std::snprintf(out, cap, "%s", pt ? "DESLIGADO" : "OFF");
+    else if (g_frame_interpolation_fps > 0)
+        std::snprintf(out, cap, "%d FPS", g_frame_interpolation_fps);
+    else if (g_host_refresh_hz > 0.0)
+        std::snprintf(out, cap, "MONITOR (%d HZ)", (int)(g_host_refresh_hz + 0.5));
+    else
+        std::snprintf(out, cap, "MONITOR");
+}
+static void ingame_opt_interp_activate(char *msg, int cap) {
+    if (!g_gl_active) {
+        std::snprintf(msg, cap, "Monitor FPS needs the OpenGL renderer");
+        return;
+    }
+    g_frame_interpolation = g_frame_interpolation ? 0 : 1;
+    if (g_frame_interpolation) g_frame_interpolation_fps = 0;   /* taxa do monitor */
+    gl_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz,
+                                  (double)g_frame_interpolation_fps,
+                                  g_frame_period_ms > 0.0
+                                      ? 1000.0 / g_frame_period_ms : 59.94,
+                                  g_frame_interpolation_blend);
+    apply_present_cadence();
+    ingame_options_persist();
+    std::snprintf(msg, cap, "Monitor FPS: %s", g_frame_interpolation ? "on" : "off");
+}
+
+static int g_ingame_launcher_requested = 0;
+static void ingame_opt_launcher_value(char *out, int cap, int pt) {
+    (void)pt;
+    if (cap > 0) out[0] = 0;
+}
+static void ingame_opt_launcher_activate(char *msg, int cap) {
+    if (cap > 0) msg[0] = 0;
+    g_ingame_launcher_requested = 1;
+}
+
+static const PsxMenuOption kIngameOptions[] = {
+    { "PROPORCAO DA TELA", "ASPECT RATIO",
+      "4:3 E A IMAGEM ORIGINAL, SEM ESTICAR, COM BARRAS PRETAS NOS LADOS EM QUALQUER MONITOR. 16:9 E 21:9 (ULTRAWIDE) ALARGAM A IMAGEM PARA ENCHER A TELA: O JOGO E 2D E SO DESENHA EM 4:3.",
+      "4:3 IS THE ORIGINAL PICTURE, NOT STRETCHED, WITH BLACK BARS ON ANY MONITOR. 16:9 AND 21:9 (ULTRAWIDE) WIDEN THE PICTURE TO FILL THE SCREEN: THE GAME IS 2D AND ONLY DRAWS IN 4:3.",
+      ingame_opt_aspect_value, ingame_opt_aspect_activate },
+    { "FILTRO DE TEXTURA", "TEXTURE FILTER",
+      "NEAREST: PIXELS NITIDOS COMO NO PS1. BILINEAR: TEXTURAS SUAVIZADAS (SO NO OPENGL).",
+      "NEAREST: SHARP PIXELS LIKE THE PS1. BILINEAR: SMOOTHED TEXTURES (OPENGL ONLY).",
+      ingame_opt_texfilter_value, ingame_opt_texfilter_activate },
+    { "SUAVIZAR A IMAGEM NA TELA", "SCREEN SMOOTHING",
+      "LIGADO: A IMAGEM FINAL E AMPLIADA COM FILTRO LINEAR. DESLIGADO: AMPLIADA SEM FILTRO (PIXELS QUADRADOS).",
+      "ON: THE FINAL PICTURE IS SCALED WITH A LINEAR FILTER. OFF: SCALED WITHOUT FILTERING (SQUARE PIXELS).",
+      ingame_opt_smooth_value, ingame_opt_smooth_activate },
+    { "FPS DO MONITOR (INTERPOLACAO)", "MONITOR FPS (INTERPOLATION)",
+      "MOSTRA QUADROS INTERMEDIARIOS ATE A TAXA DO MONITOR, MISTURANDO O QUADRO ANTERIOR COM O ATUAL. O JOGO CONTINUA NA VELOCIDADE NORMAL. PODE DEIXAR UM LEVE RASTRO.",
+      "SHOWS IN-BETWEEN FRAMES UP TO THE MONITOR RATE BY BLENDING THE PREVIOUS AND CURRENT FRAME. GAME SPEED IS UNCHANGED. MAY LEAVE A SLIGHT TRAIL.",
+      ingame_opt_interp_value, ingame_opt_interp_activate },
+    { "VOLTAR AO LAUNCHER", "BACK TO THE LAUNCHER",
+      "FECHA O JOGO E ABRE O LAUNCHER. SALVE ANTES: O PROGRESSO NAO SALVO E PERDIDO.",
+      "CLOSES THE GAME AND OPENS THE LAUNCHER. SAVE FIRST: UNSAVED PROGRESS IS LOST.",
+      ingame_opt_launcher_value, ingame_opt_launcher_activate },
+};
+
 static int cheats_menu_open = 0;
 static int cheats_menu_sel = 0;
 static int cheats_menu_ignore_toggle_release = 0;
@@ -6276,21 +6408,32 @@ static void cheats_menu_close(void) {
     cheats_menu_sync();
 }
 
-static void cheats_menu_toggle(SDL_Keycode opened_by_key) {
+static int cheats_menu_mode = 0;   /* 0 = cheats, 1 = opções */
+
+static void cheats_menu_toggle_mode(SDL_Keycode opened_by_key, int mode) {
     if (psx_rewind_is_open() || savestate_menu_open)
         return;
     if (cheats_menu_open) {
         cheats_menu_close();
         return;
     }
-    if (psx_netplay_active()) {
+    cheats_menu_mode = mode ? 1 : 0;
+    psx_cheats_menu_set_mode(cheats_menu_mode);
+    cheats_menu_sel = 0;
+    if (!cheats_menu_mode && psx_netplay_active()) {
         host_osd_push("Cheats: netplay", 1500);
         return;
     }
+    psx_cheats_menu_set_options(
+        kIngameOptions, (int)(sizeof(kIngameOptions) / sizeof(kIngameOptions[0])));
     cheats_menu_open = 1;
     cheats_menu_ignore_toggle_release = 1;
     cheats_menu_open_key = opened_by_key;
     cheats_menu_sync();
+}
+
+static void cheats_menu_toggle(SDL_Keycode opened_by_key) {
+    cheats_menu_toggle_mode(opened_by_key, 0);
 }
 
 static void cheats_menu_move(int delta) {
@@ -6306,6 +6449,13 @@ static void cheats_menu_toggle_selected(void) {
     psx_cheats_toggle(cheats_menu_sel, msg, (int)sizeof(msg));
     if (msg[0]) host_osd_push(msg, 1500);
     cheats_menu_sync();
+    if (g_ingame_launcher_requested) {
+        g_ingame_launcher_requested = 0;
+        psx_crash_trace_set_exit_origin("ingame_menu_launcher");
+        psx_relaunch_launcher();
+        shutdown_runtime();
+        std::exit(0);
+    }
 }
 
 static void cheats_menu_handle_key(SDL_Keycode key, SDL_Scancode scancode,
@@ -6315,6 +6465,7 @@ static void cheats_menu_handle_key(SDL_Keycode key, SDL_Scancode scancode,
     if (!repeat &&
         (host_keymap_match_event(HOST_KEYMAP_CHEATS_MENU, (int)key,
                                  (int)scancode, mod) ||
+         (cheats_menu_mode && key == SDLK_F4) ||
          key == SDLK_ESCAPE || key == SDLK_BACKSPACE)) {
         cheats_menu_close();
     } else if (key == SDLK_UP || key == SDLK_LEFT) {
@@ -6347,7 +6498,8 @@ static void cheats_menu_poll_nav(uint32_t now_ms) {
         if (SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_B))
             cancel = 1;
     }
-    const int toggle = hotkey_pad_binding_down(PSX_HOTKEY_PAD_SELECT_L3);
+    const int toggle = hotkey_pad_binding_down(
+        cheats_menu_mode ? PSX_HOTKEY_PAD_SELECT_SQUARE : PSX_HOTKEY_PAD_SELECT_L3);
     if (cheats_menu_ignore_toggle_release) {
         if (!toggle && !ok)
             cheats_menu_ignore_toggle_release = 0;
@@ -6382,6 +6534,11 @@ static void cheats_menu_poll_toggle_buttons(void) {
     if (down && !was_down && !psx_rewind_is_open() && !savestate_menu_open)
         cheats_menu_toggle(0);
     was_down = down;
+    static int opt_was_down;
+    int opt_down = hotkey_pad_binding_down(PSX_HOTKEY_PAD_SELECT_SQUARE);
+    if (opt_down && !opt_was_down && !psx_rewind_is_open() && !savestate_menu_open)
+        cheats_menu_toggle_mode(0, 1);
+    opt_was_down = opt_down;
 }
 
 /* Latched fast-forward: [KeyMap] TurboToggle (default F9) or the [hotkeys]
@@ -6827,6 +6984,10 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                                  (int)key, (int)scancode,
                                                  (int)mod)) {
                     cheats_menu_toggle(key);
+                }
+                else if (!key_repeat && key == SDLK_F4 &&
+                         !((int)mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT))) {
+                    cheats_menu_toggle_mode(key, 1);
                 }
                 else if (key == SDLK_c && (mod & KMOD_CTRL)) {
                     std::fprintf(stdout, "[DEBUG] Forzando reinserción de CD...\n");
@@ -7374,7 +7535,8 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * decode; the activity stamp also covers authentic 4:3 configurations. */
         if (g_gl_active)
             gl_renderer_set_interpolation_suspended(
-                fmv_frame || mdec_recently_active(2));
+                di.depth24 || mdec_recently_active(2) ||
+                (g_ws_engaged && gpu_ws_present_native_43() != 0));
         const int local_viewport_slot = netplay_local_viewport_slot();
         const bool local_viewport_crop = local_viewport_slot >= 0;
         bool local_viewport_wide =
@@ -11146,7 +11308,8 @@ namespace {
         gi->pad_mode_selectable = ctrl_lock_mode_b ? 0 : 1;
         gi->locked_pad_mode = locked_pad_mode_i;
         gi->lock_device = ctrl_lock_device_b ? 1 : 0;
-        gi->aspect_mask = 0x3;
+        gi->aspect_mask = 0x7;   /* 4:3, 16:9, 21:9 */
+        gi->has_frame_interp = 1;
         gi->renderer_labels = kPsxRendererLabels;
         gi->num_renderers = vulkan_offered_b ? 3 : 2;
         gi->settings_bindings = 1;
@@ -11201,6 +11364,24 @@ namespace {
 #endif
     }
 }  // namespace
+
+/* Grava em settings.toml as opções trocadas no menu em jogo. */
+static void ingame_options_persist(void) {
+    if (g_lnch_settings_path.empty()) return;
+    PSXRecompV4::UserSettings us =
+        PSXRecompV4::load_user_settings(g_lnch_settings_path);
+    if (us.parse_error) return;
+    us.antialiasing = g_video_aa;             us.has_antialiasing = true;
+    us.texture_filter = g_video_texfilter;    us.has_texture_filter = true;
+    us.aspect_num = g_video_aspect_num;
+    us.aspect_den = g_video_aspect_den;
+    us.has_aspect_ratio = true;
+    us.frame_interpolation = g_frame_interpolation != 0;
+    us.has_frame_interpolation = true;
+    us.frame_interpolation_fps = g_frame_interpolation_fps;
+    us.has_frame_interpolation_fps = true;
+    PSXRecompV4::save_user_settings(g_lnch_settings_path, us);
+}
 #endif
 
 int main(int argc, char** argv) {
@@ -11427,8 +11608,8 @@ int main(int argc, char** argv) {
      * cannot expose generic launcher controls or activate the features. Trusted
      * activation plugins apply them after launcher/settings resolution. */
     constexpr bool ws_offered = true;
-    constexpr bool ws_ultrawide_offered = false;
-    constexpr bool frame_interpolation_offered = false;
+    constexpr bool ws_ultrawide_offered = true;
+    constexpr bool frame_interpolation_offered = true;
     constexpr bool skip_fmv_offered = false;
     /* Load acceleration is likewise mod-owned (Fast Loading / CD Speed). The
      * former game.toml `offer_turbo_loads` opt-out is deprecated and ignored:
