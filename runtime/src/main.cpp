@@ -6464,6 +6464,24 @@ static void disc_prompt_poll(void) {
     }
 }
 
+static void ingame_opt_filter_value(char *out, int cap, int lang) {
+    if (!g_gl_active) {
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "OPENGL ONLY", "SO NO OPENGL", "SOLO OPENGL"));
+        return;
+    }
+    std::snprintf(out, cap, "%s", psx_screen_filter_label(gl_renderer_get_screen_filter(), lang));
+}
+static void ingame_opt_filter_activate(char *msg, int cap) {
+    if (!g_gl_active) {
+        std::snprintf(msg, cap, "Screen filters need the OpenGL renderer");
+        return;
+    }
+    const int next = (gl_renderer_get_screen_filter() + 1) % 5;
+    gl_renderer_set_screen_filter(next);
+    psx_screen_filter_save(next);
+    std::snprintf(msg, cap, "%s", psx_screen_filter_label(next, psx_ui_lang()));
+}
+
 static int g_ingame_launcher_requested = 0;
 static void ingame_opt_launcher_value(char *out, int cap, int pt) {
     (void)pt;
@@ -6493,6 +6511,12 @@ static const PsxMenuOption kIngameOptions[] = {
       "SUAVIZAR LA IMAGEN",
       "ACTIVADO: LA IMAGEN FINAL SE AMPLIA CON FILTRO LINEAL. DESACTIVADO: SE AMPLIA SIN FILTRO (PIXELES CUADRADOS).",
       ingame_opt_smooth_value, ingame_opt_smooth_activate },
+    { "FILTRO DE TELA", "SCREEN FILTER",
+      "LCD: GRADE ESCURA ENTRE OS PIXELS, COMO TELA DE PORTATIL. LCD RGB: COM SUBPIXELS COLORIDOS. CRT: MASCARA DE TUBO COM LINHAS. CRT SUAVE: SO A MASCARA. FICA MELHOR COM A JANELA GRANDE OU EM TELA CHEIA.",
+      "LCD: DARK GRID BETWEEN PIXELS, LIKE A HANDHELD SCREEN. LCD RGB: WITH COLOURED SUBPIXELS. CRT: TUBE MASK WITH SCANLINES. SOFT CRT: MASK ONLY. LOOKS BEST WITH A LARGE WINDOW OR FULL SCREEN.",
+      "FILTRO DE PANTALLA",
+      "LCD: REJILLA OSCURA ENTRE LOS PIXELES, COMO UNA PORTATIL. LCD RGB: CON SUBPIXELES DE COLOR. CRT: MASCARA DE TUBO CON LINEAS. CRT SUAVE: SOLO LA MASCARA. SE VE MEJOR CON LA VENTANA GRANDE O A PANTALLA COMPLETA.",
+      ingame_opt_filter_value, ingame_opt_filter_activate },
     { "TROCAR DISCO", "CHANGE DISC",
       "TROCA PARA O OUTRO DISCO, COMO ABRIR E FECHAR A TAMPA DO CONSOLE. O JOGO TAMBEM TROCA SOZINHO QUANDO PEDE OUTRO DISCO. O OUTRO DISCO PRECISA ESTAR NA MESMA PASTA, COM O MESMO NOME (DISC 1 / DISC 2).",
       "SWITCHES TO THE OTHER DISC, LIKE OPENING AND CLOSING THE CONSOLE LID. THE GAME ALSO SWITCHES BY ITSELF WHEN IT ASKS FOR ANOTHER DISC. THE OTHER DISC MUST BE IN THE SAME FOLDER WITH THE SAME NAME (DISC 1 / DISC 2).",
@@ -13616,7 +13640,8 @@ int main(int argc, char** argv) {
                 if (seed.has_scanlines) g_video_scanlines = seed.scanlines;
                 if (seed.has_scanline_strength)
                     g_video_scanline_strength = (float)seed.scanline_strength;
-                gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
+                gl_renderer_set_screen_filter(psx_screen_filter_load());
+    gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                                           g_video_scanline_strength);
                 g_auto_skip_fmv = skip_fmv_offered && seed.auto_skip_fmv ? 1 : 0;
                 g_turbo_loads_enabled =
@@ -14002,6 +14027,7 @@ session_reboot:
         float s = (float)atof(e);
         if (s >= 0.f && s <= 1.f) g_video_scanline_strength = s;
     }
+    gl_renderer_set_screen_filter(psx_screen_filter_load());
     gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                               g_video_scanline_strength);
     if (g_video_geometry_correction || g_video_perspective_texturing) {
@@ -15533,7 +15559,8 @@ soft_return_lobby:
             g_video_scanlines = ls.scanlines != 0;
             if (ls.scanline_strength_pct >= 0)
                 g_video_scanline_strength = ls.scanline_strength_pct / 100.0f;
-            gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
+            gl_renderer_set_screen_filter(psx_screen_filter_load());
+    gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                                       g_video_scanline_strength);
 #endif
             /* Load acceleration and FMV skipping are mod-owned on PSX, and the
