@@ -727,13 +727,19 @@ static void gpu_ll_complete(void *opaque, int hit_limit) {
     complete_transfer(2);
 }
 
+static uint32_t gpu_ll_busy_cycles(void *opaque) {
+    (void)opaque;
+    return gpu_draw_busy_cycles();
+}
+
 static const DMAGPULinkedListOps gpu_ll_ops = {
     gpu_ll_resolve_address,
     gpu_ll_read_word,
     gpu_ll_observe_header,
     gpu_ll_begin_node,
     gpu_ll_emit_word,
-    gpu_ll_complete
+    gpu_ll_complete,
+    gpu_ll_busy_cycles
 };
 
 static void start_async_gpu_linked_list(void) {
