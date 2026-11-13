@@ -34,6 +34,8 @@ extern "C" void psx_cheats_menu_set_state(int, int) {}
 extern "C" int  psx_cheats_menu_selected(void) { return 0; }
 extern "C" int  psx_cheats_menu_needs_present(void) { return 0; }
 extern "C" int  psx_cheats_menu_overlay_image(const uint32_t**, int*, int*) { return 0; }
+extern "C" void psx_cheats_menu_set_options(const PsxMenuOption*, int) {}
+extern "C" void psx_cheats_menu_set_mode(int) {}
 #else
 
 #include "recomp_cheats.h"
@@ -160,9 +162,30 @@ extern "C" void psx_cheats_on_vblank(void) {
     }
 }
 
+/* Opções do jogo (vídeo etc.) mostradas antes dos cheats no menu. Quem as
+ * fornece é o main.cpp; aqui só desenhamos e repassamos o "ativar". */
+static const PsxMenuOption* s_opts = nullptr;
+static int s_nopt_all = 0;
+static int s_mode = 0;          /* 0 = menu de cheats, 1 = menu de opções */
+static int s_mode_dirty = 0;
+#define s_nopt   (s_mode ? s_nopt_all : 0)
+#define s_ncheat (s_mode ? 0 : s_list.count)
+
+extern "C" void psx_cheats_menu_set_mode(int options) {
+    options = options ? 1 : 0;
+    if (options != s_mode) s_mode_dirty = 1;
+    s_mode = options;
+}
+
+extern "C" void psx_cheats_menu_set_options(const PsxMenuOption* opts, int n) {
+    s_opts = opts;
+    s_nopt_all = (opts && n > 0) ? n : 0;
+}
+
+/* Total de linhas do menu: opções + cheats. */
 extern "C" int psx_cheats_count(void) {
     ensure_loaded();
-    return s_list.count;
+    return s_nopt + s_ncheat;
 }
 
 extern "C" int psx_cheats_file_found(void) {
@@ -312,28 +335,45 @@ static int draw_wrapped(int x, int y, const char* s, uint32_t col, int width, in
 static void rasterize(void) {
     const int pt = ui_pt();
     char buf[160];
+    const int total = s_nopt + s_ncheat;
+    s_mode_dirty = 0;
     for (int i = 0; i < CM_W * CM_H; i++) s_panel[i] = 0xFF0F1118u;
     fill_rect(0, 0, CM_W, 46, 0xFF171B25u);
-    draw_text(24, 14, "CHEATS", 0xFFFFD24Du, 2, 0);
-    draw_text(420, 18, pt ? "F5 / SELECT+L3" : "F5 / SELECT+L3", 0xFFB8BDC8u, 1, 0);
+    draw_text(24, 14, s_mode ? (pt ? "OPCOES" : "OPTIONS") : "CHEATS", 0xFFFFD24Du, 2, 0);
+    draw_text(s_mode ? 440 : 480, 18,
+              s_mode ? (pt ? "F4 / SELECT+QUADRADO" : "F4 / SELECT+SQUARE") : "F5 / SELECT+L3",
+              0xFFB8BDC8u, 1, 0);
 
-    if (s_list.count == 0) {
+    if (total == 0) {
         draw_wrapped(28, 80, s_list.loaded
                      ? (pt ? "O ARQUIVO CHEATS.TXT NAO TEM NENHUM CHEAT." : "CHEATS.TXT HAS NO CHEATS.")
                      : (pt ? "CHEATS.TXT NAO ENCONTRADO NA PASTA DO JOGO." : "CHEATS.TXT NOT FOUND NEXT TO THE GAME."),
                      0xFFE2E5EBu, 70, 3);
     } else {
         int first = s_sel - CM_VISIBLE / 2;
-        if (first > s_list.count - CM_VISIBLE) first = s_list.count - CM_VISIBLE;
+        if (first > total - CM_VISIBLE) first = total - CM_VISIBLE;
         if (first < 0) first = 0;
-        snprintf(buf, sizeof(buf), "%d / %d", s_sel + 1, s_list.count);
+        snprintf(buf, sizeof(buf), "%d / %d", s_sel + 1, total);
         draw_text(24, 50, buf, 0xFF7F8796u, 1, 0);
-        for (int i = first; i < s_list.count && i < first + CM_VISIBLE; ++i) {
-            const RecompCheat* c = &s_list.cheats[i];
+        for (int i = first; i < total && i < first + CM_VISIBLE; ++i) {
             const int y = CM_ROWS_Y + (i - first) * CM_ROW_H;
             const int sel = (i == s_sel);
             fill_rect(20, y, 600, CM_ROW_H - 4, sel ? 0xFF2B2830u : 0xFF191D27u);
             stroke_rect(20, y, 600, CM_ROW_H - 4, sel ? 0xFFFFD24Du : 0xFF303746u);
+            if (i < s_nopt) {
+                const PsxMenuOption* o = &s_opts[i];
+                char val[48];
+                val[0] = 0;
+                if (o->value) o->value(val, (int)sizeof(val), pt);
+                draw_text(32, y + 7, pt ? o->name_pt : o->name_en,
+                          sel ? 0xFFFFD24Du : 0xFFE2E5EBu, 1, 44);
+                char a[48];
+                to_ascii(val, a, sizeof(a));
+                int len = (int)strlen(a);
+                draw_text(608 - len * 8, y + 7, a, 0xFF7FD4FFu, 1, 0);
+                continue;
+            }
+            const RecompCheat* c = &s_list.cheats[i - s_nopt];
             /* caixinha */
             stroke_rect(30, y + 5, 12, 12, 0xFFB8BDC8u);
             if (c->enabled) fill_rect(33, y + 8, 6, 6, 0xFF6BE38Bu);
@@ -341,39 +381,46 @@ static void rasterize(void) {
             draw_text(52, y + 7, recomp_cheat_name(c, pt), fg, 1, 68);
         }
         /* descrição do selecionado */
-        const RecompCheat* c = &s_list.cheats[s_sel];
         fill_rect(0, 352, CM_W, 58, 0xFF141822u);
-        int used = 0;
-        if (!c->supported)
-            used = draw_wrapped(24, 358, pt ? "TIPO DE CODIGO NAO SUPORTADO - NAO SERA APLICADO."
-                                            : "UNSUPPORTED CODE TYPE - WILL NOT BE APPLIED.",
-                                0xFFFF8A65u, 74, 1);
-        draw_wrapped(24, 358 + used * 12, recomp_cheat_note(c, pt), 0xFFB8BDC8u, 74, 4 - used);
+        if (s_sel < s_nopt) {
+            const PsxMenuOption* o = &s_opts[s_sel];
+            draw_wrapped(24, 358, pt ? o->note_pt : o->note_en, 0xFFB8BDC8u, 74, 4);
+        } else {
+            const RecompCheat* c = &s_list.cheats[s_sel - s_nopt];
+            int used = 0;
+            if (!c->supported)
+                used = draw_wrapped(24, 358, pt ? "TIPO DE CODIGO NAO SUPORTADO - NAO SERA APLICADO."
+                                                : "UNSUPPORTED CODE TYPE - WILL NOT BE APPLIED.",
+                                    0xFFFF8A65u, 74, 1);
+            draw_wrapped(24, 358 + used * 12, recomp_cheat_note(c, pt), 0xFFB8BDC8u, 74, 4 - used);
+        }
     }
 
     fill_rect(0, 410, CM_W, 70, 0xFF171B25u);
-    draw_text(32, 426, pt ? "CIMA/BAIXO: ESCOLHER   X/ENTER: LIGAR/DESLIGAR   O/ESC: SAIR"
-                          : "UP/DOWN: SELECT   X/ENTER: TOGGLE   O/ESC: CLOSE",
+    draw_text(32, 426, pt ? "CIMA/BAIXO: ESCOLHER   X/ENTER: MUDAR   O/ESC: SAIR"
+                          : "UP/DOWN: SELECT   X/ENTER: CHANGE   O/ESC: CLOSE",
               0xFFE2E5EBu, 1, 0);
-    draw_text(32, 450, pt ? "OS CHEATS LIGADOS VALEM A CADA QUADRO. A ESCOLHA FICA SALVA."
-                          : "ENABLED CHEATS APPLY EVERY FRAME. CHOICES ARE SAVED.",
+    draw_text(32, 450, s_mode ? (pt ? "AS MUDANCAS VALEM NA HORA E FICAM SALVAS."
+                                    : "CHANGES APPLY IMMEDIATELY AND ARE SAVED.")
+                              : (pt ? "OS CHEATS LIGADOS VALEM A CADA QUADRO. A ESCOLHA FICA SALVA."
+                                    : "ENABLED CHEATS APPLY EVERY FRAME. CHOICES ARE SAVED."),
               0xFF7F8796u, 1, 0);
     s_dirty = 0;
 }
 
 extern "C" void psx_cheats_menu_set_state(int open, int selected) {
     ensure_loaded();
-    if (s_list.count > 0) {
-        while (selected < 0) selected += s_list.count;
-        selected %= s_list.count;
+    if (s_nopt + s_ncheat > 0) {
+        while (selected < 0) selected += s_nopt + s_ncheat;
+        selected %= s_nopt + s_ncheat;
     } else {
         selected = 0;
     }
-    if (s_open != (open ? 1 : 0) || s_sel != selected) s_dirty = 1;
+    if (s_open != (open ? 1 : 0) || s_sel != selected || s_mode_dirty) s_dirty = 1;
     if (open && !s_open) {   /* recarrega ao abrir: pega edições do arquivo */
         int keep = selected;
         psx_cheats_reload();
-        if (keep >= s_list.count) keep = 0;
+        if (keep >= s_nopt + s_ncheat) keep = 0;
         selected = keep;
         s_dirty = 1;
     }
@@ -387,7 +434,14 @@ extern "C" int psx_cheats_menu_selected(void) { return s_sel; }
  * cheats.txt e escreve em msg uma mensagem curta para a tela. */
 extern "C" int psx_cheats_toggle(int index, char* msg, int msg_cap) {
     ensure_loaded();
-    if (index < 0 || index >= s_list.count) return -1;
+    if (index >= 0 && index < s_nopt) {
+        if (msg && msg_cap > 0) msg[0] = 0;
+        if (s_opts[index].activate) s_opts[index].activate(msg, msg_cap);
+        s_dirty = 1;
+        return 1;
+    }
+    index -= s_nopt;
+    if (index < 0 || index >= s_ncheat) return -1;
     RecompCheat* c = &s_list.cheats[index];
     const int pt = ui_pt();
     if (!c->supported) {
@@ -419,3 +473,47 @@ extern "C" int psx_cheats_menu_overlay_image(const uint32_t** pixels, int* w, in
 }
 
 #endif /* RECOMP_LAUNCHER */
+
+/* Abre o launcher num processo novo (o chamador encerra o jogo em seguida).
+ * Fica fora do #if RECOMP_LAUNCHER: sem launcher o processo novo só inicia o
+ * jogo de novo. */
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  include <windows.h>
+#  include <wchar.h>
+extern "C" int psx_relaunch_launcher(void) {
+    wchar_t exe[2048];
+    DWORD n = GetModuleFileNameW(NULL, exe, 2048);
+    if (n == 0 || n >= 2048) return 0;
+    wchar_t cmd[2200];
+    _snwprintf(cmd, 2200, L"\"%ls\" --launcher", exe);
+    cmd[2199] = 0;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    ZeroMemory(&pi, sizeof(pi));
+    if (!CreateProcessW(exe, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+        return 0;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return 1;
+}
+#else
+#  include <unistd.h>
+extern "C" int psx_relaunch_launcher(void) {
+    char exe[4096];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (n <= 0) return 0;
+    exe[n] = 0;
+    pid_t pid = fork();
+    if (pid < 0) return 0;
+    if (pid == 0) {
+        execl(exe, exe, "--launcher", (char*)NULL);
+        _exit(127);
+    }
+    return 1;
+}
+#endif
