@@ -193,9 +193,12 @@ extern "C" int psx_cheats_file_found(void) {
     return s_list.loaded;
 }
 
-static int ui_pt(void) {
-    const char* l = launcher_i18n_language();
-    return l && (l[0] == 'p' || l[0] == 'P');
+/* Idioma do menu: 0 = inglês, 1 = português, 2 = espanhol (o do launcher). */
+static int ui_lang(void) {
+    return recomp_cheat_lang_from_code(launcher_i18n_language());
+}
+static const char* tr(int lang, const char* en, const char* pt, const char* es) {
+    return lang == 1 ? pt : lang == 2 ? es : en;
 }
 
 /* ------------------------------------------------------------------ menu */
@@ -333,21 +336,25 @@ static int draw_wrapped(int x, int y, const char* s, uint32_t col, int width, in
 }
 
 static void rasterize(void) {
-    const int pt = ui_pt();
+    const int lang = ui_lang();
     char buf[160];
     const int total = s_nopt + s_ncheat;
     s_mode_dirty = 0;
     for (int i = 0; i < CM_W * CM_H; i++) s_panel[i] = 0xFF0F1118u;
     fill_rect(0, 0, CM_W, 46, 0xFF171B25u);
-    draw_text(24, 14, s_mode ? (pt ? "OPCOES" : "OPTIONS") : "CHEATS", 0xFFFFD24Du, 2, 0);
+    draw_text(24, 14, s_mode ? tr(lang, "OPTIONS", "OPCOES", "OPCIONES")
+                             : tr(lang, "CHEATS", "CHEATS", "TRUCOS"), 0xFFFFD24Du, 2, 0);
     draw_text(s_mode ? 440 : 480, 18,
-              s_mode ? (pt ? "F4 / SELECT+QUADRADO" : "F4 / SELECT+SQUARE") : "F5 / SELECT+L3",
+              s_mode ? tr(lang, "F4 / SELECT+SQUARE", "F4 / SELECT+QUADRADO", "F4 / SELECT+CUADRADO")
+                     : "F5 / SELECT+L3",
               0xFFB8BDC8u, 1, 0);
 
     if (total == 0) {
         draw_wrapped(28, 80, s_list.loaded
-                     ? (pt ? "O ARQUIVO CHEATS.TXT NAO TEM NENHUM CHEAT." : "CHEATS.TXT HAS NO CHEATS.")
-                     : (pt ? "CHEATS.TXT NAO ENCONTRADO NA PASTA DO JOGO." : "CHEATS.TXT NOT FOUND NEXT TO THE GAME."),
+                     ? tr(lang, "CHEATS.TXT HAS NO CHEATS.", "O ARQUIVO CHEATS.TXT NAO TEM NENHUM CHEAT.",
+                          "CHEATS.TXT NO TIENE TRUCOS.")
+                     : tr(lang, "CHEATS.TXT NOT FOUND NEXT TO THE GAME.", "CHEATS.TXT NAO ENCONTRADO NA PASTA DO JOGO.",
+                          "NO SE ENCONTRO CHEATS.TXT JUNTO AL JUEGO."),
                      0xFFE2E5EBu, 70, 3);
     } else {
         int first = s_sel - CM_VISIBLE / 2;
@@ -364,8 +371,8 @@ static void rasterize(void) {
                 const PsxMenuOption* o = &s_opts[i];
                 char val[48];
                 val[0] = 0;
-                if (o->value) o->value(val, (int)sizeof(val), pt);
-                draw_text(32, y + 7, pt ? o->name_pt : o->name_en,
+                if (o->value) o->value(val, (int)sizeof(val), lang);
+                draw_text(32, y + 7, tr(lang, o->name_en, o->name_pt, o->name_es),
                           sel ? 0xFFFFD24Du : 0xFFE2E5EBu, 1, 44);
                 char a[48];
                 to_ascii(val, a, sizeof(a));
@@ -378,32 +385,36 @@ static void rasterize(void) {
             stroke_rect(30, y + 5, 12, 12, 0xFFB8BDC8u);
             if (c->enabled) fill_rect(33, y + 8, 6, 6, 0xFF6BE38Bu);
             uint32_t fg = !c->supported ? 0xFF6A7080u : sel ? 0xFFFFD24Du : 0xFFE2E5EBu;
-            draw_text(52, y + 7, recomp_cheat_name(c, pt), fg, 1, 68);
+            draw_text(52, y + 7, recomp_cheat_name(c, lang), fg, 1, 68);
         }
         /* descrição do selecionado */
         fill_rect(0, 352, CM_W, 58, 0xFF141822u);
         if (s_sel < s_nopt) {
             const PsxMenuOption* o = &s_opts[s_sel];
-            draw_wrapped(24, 358, pt ? o->note_pt : o->note_en, 0xFFB8BDC8u, 74, 4);
+            draw_wrapped(24, 358, tr(lang, o->note_en, o->note_pt, o->note_es), 0xFFB8BDC8u, 74, 4);
         } else {
             const RecompCheat* c = &s_list.cheats[s_sel - s_nopt];
             int used = 0;
             if (!c->supported)
-                used = draw_wrapped(24, 358, pt ? "TIPO DE CODIGO NAO SUPORTADO - NAO SERA APLICADO."
-                                                : "UNSUPPORTED CODE TYPE - WILL NOT BE APPLIED.",
+                used = draw_wrapped(24, 358, tr(lang, "UNSUPPORTED CODE TYPE - WILL NOT BE APPLIED.",
+                                                "TIPO DE CODIGO NAO SUPORTADO - NAO SERA APLICADO.",
+                                                "TIPO DE CODIGO NO COMPATIBLE - NO SE APLICARA."),
                                     0xFFFF8A65u, 74, 1);
-            draw_wrapped(24, 358 + used * 12, recomp_cheat_note(c, pt), 0xFFB8BDC8u, 74, 4 - used);
+            draw_wrapped(24, 358 + used * 12, recomp_cheat_note(c, lang), 0xFFB8BDC8u, 74, 4 - used);
         }
     }
 
     fill_rect(0, 410, CM_W, 70, 0xFF171B25u);
-    draw_text(32, 426, pt ? "CIMA/BAIXO: ESCOLHER   X/ENTER: MUDAR   O/ESC: SAIR"
-                          : "UP/DOWN: SELECT   X/ENTER: CHANGE   O/ESC: CLOSE",
+    draw_text(32, 426, tr(lang, "UP/DOWN: SELECT   X/ENTER: CHANGE   O/ESC: CLOSE",
+                              "CIMA/BAIXO: ESCOLHER   X/ENTER: MUDAR   O/ESC: SAIR",
+                              "ARRIBA/ABAJO: ELEGIR   X/ENTER: CAMBIAR   O/ESC: SALIR"),
               0xFFE2E5EBu, 1, 0);
-    draw_text(32, 450, s_mode ? (pt ? "AS MUDANCAS VALEM NA HORA E FICAM SALVAS."
-                                    : "CHANGES APPLY IMMEDIATELY AND ARE SAVED.")
-                              : (pt ? "OS CHEATS LIGADOS VALEM A CADA QUADRO. A ESCOLHA FICA SALVA."
-                                    : "ENABLED CHEATS APPLY EVERY FRAME. CHOICES ARE SAVED."),
+    draw_text(32, 450, s_mode ? tr(lang, "CHANGES APPLY IMMEDIATELY AND ARE SAVED.",
+                                       "AS MUDANCAS VALEM NA HORA E FICAM SALVAS.",
+                                       "LOS CAMBIOS SE APLICAN AL INSTANTE Y SE GUARDAN.")
+                              : tr(lang, "ENABLED CHEATS APPLY EVERY FRAME. CHOICES ARE SAVED.",
+                                       "OS CHEATS LIGADOS VALEM A CADA QUADRO. A ESCOLHA FICA SALVA.",
+                                       "LOS TRUCOS ACTIVOS SE APLICAN EN CADA FOTOGRAMA. LA ELECCION SE GUARDA."),
               0xFF7F8796u, 1, 0);
     s_dirty = 0;
 }
@@ -443,9 +454,10 @@ extern "C" int psx_cheats_toggle(int index, char* msg, int msg_cap) {
     index -= s_nopt;
     if (index < 0 || index >= s_ncheat) return -1;
     RecompCheat* c = &s_list.cheats[index];
-    const int pt = ui_pt();
+    const int lang = ui_lang();
     if (!c->supported) {
-        if (msg) snprintf(msg, msg_cap, "%s", pt ? "Cheat nao suportado" : "Cheat not supported");
+        if (msg) snprintf(msg, msg_cap, "%s",
+                          tr(lang, "Cheat not supported", "Cheat nao suportado", "Truco no compatible"));
         return -1;
     }
     c->enabled = !c->enabled;
@@ -454,9 +466,10 @@ extern "C" int psx_cheats_toggle(int index, char* msg, int msg_cap) {
     s_dirty = 1;
     if (msg) {
         char name[96];
-        to_ascii(recomp_cheat_name(c, pt), name, sizeof(name));
+        to_ascii(recomp_cheat_name(c, lang), name, sizeof(name));
         snprintf(msg, msg_cap, "%s: %s", name,
-                 c->enabled ? (pt ? "ligado" : "on") : (pt ? "desligado" : "off"));
+                 c->enabled ? tr(lang, "on", "ligado", "activado")
+                            : tr(lang, "off", "desligado", "desactivado"));
     }
     return c->enabled;
 }

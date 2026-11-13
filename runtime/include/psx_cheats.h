@@ -20,7 +20,8 @@ int  psx_cheats_toggle(int index, char *msg, int msg_cap);
 typedef struct PsxMenuOption {
     const char *name_pt, *name_en;   /* ASCII, maiúsculas */
     const char *note_pt, *note_en;
-    void (*value)(char *out, int cap, int pt);   /* valor atual */
+    const char *name_es, *note_es;
+    void (*value)(char *out, int cap, int lang); /* valor atual; lang 0=en 1=pt 2=es */
     void (*activate)(char *msg, int cap);        /* X/Enter: troca o valor */
 } PsxMenuOption;
 void psx_cheats_menu_set_options(const PsxMenuOption *opts, int count);
