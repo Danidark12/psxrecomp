@@ -29,6 +29,10 @@ void psx_cheats_menu_set_options(const PsxMenuOption *opts, int count);
 void psx_cheats_menu_set_mode(int options);
 /* Idioma da interface (o do launcher): 0 = inglês, 1 = português, 2 = espanhol. */
 int psx_ui_lang(void);
+/* Filtro de tela (0 nenhum, 1 LCD, 2 LCD RGB, 3 CRT, 4 CRT suave). */
+int psx_screen_filter_load(void);
+void psx_screen_filter_save(int mode);
+const char *psx_screen_filter_label(int mode, int lang);
 
 void psx_cheats_menu_set_state(int open, int selected);
 int  psx_cheats_menu_selected(void);

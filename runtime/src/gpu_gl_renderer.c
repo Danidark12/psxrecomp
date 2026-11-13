@@ -327,6 +327,12 @@ static int           s_scanline_on = 0;
 static float         s_scanline_strength = 0.5f;
 static GLint         s_present_uScanline = -1, s_present_uScanStrength = -1;
 static GLint         s_present_uScanLines = -1, s_present_uScanScale = -1;
+/* Filtro de tela (LCD/CRT), independente das scanlines. 0 = nenhum. */
+static int           s_screen_filter = 0;
+static GLint         s_present_uFilter = -1, s_present_uFilterCols = -1;
+static GLint         s_present_uFilterXScale = -1;
+static GLint         s_interp_uFilter = -1, s_interp_uFilterCols = -1;
+static GLint         s_interp_uFilterXScale = -1;
 static GLuint        s_interp_prog = 0, s_interp_tex[3];
 static GLint         s_interp_uPrev = -1, s_interp_uCurr = -1;
 static GLint         s_interp_uAlpha = -1, s_interp_uUvRect = -1;
@@ -897,7 +903,10 @@ static const char *PRESENT_VS =
     "uniform int   u_scanline;\n" \
     "uniform float u_scanline_strength;\n" \
     "uniform float u_scanline_lines;\n" \
-    "uniform float u_scanline_scale;\n"
+    "uniform float u_scanline_scale;\n" \
+    "uniform int   u_filter;\n" \
+    "uniform float u_filter_cols;\n" \
+    "uniform float u_filter_xscale;\n"
 #define PSX_SCANLINE_FUNC \
     "vec3 psx_scanline(vec3 rgb, float vy){\n" \
     "  if (u_scanline == 0) return rgb;\n" \
@@ -907,6 +916,43 @@ static const char *PRESENT_VS =
     "  float beam = sin(3.14159265 * p);\n" \
     "  float mult = 1.0 - (u_scanline_strength * gate) * (1.0 - beam);\n" \
     "  return rgb * mult;\n" \
+    "}\n" \
+    /* Filtros de tela, na grade de pixels do PS1 (posição dentro do pixel  \
+     * vinda de v_uv * colunas/linhas). Somem aos poucos quando a janela    \
+     * tem menos de ~3 pixels de saída por pixel do PS1.                    \
+     *   1 LCD: grade escura entre os pixels (portáteis).                    \
+     *   2 LCD RGB: grade + subpixels vermelho/verde/azul (estilo GBA).      \
+     *   3 CRT: máscara de abertura RGB + linhas de varredura suaves.        \
+     *   4 CRT suave: só máscara leve + brilho, sem linhas marcadas. */     \
+    "vec3 psx_filter(vec3 rgb, vec2 uv){\n" \
+    "  if (u_filter == 0) return rgb;\n" \
+    "  float sx = max(u_filter_xscale, 0.0), sy = max(u_scanline_scale, 0.0);\n" \
+    "  float gate = clamp(min(sx, sy) - 2.0, 0.0, 1.0);\n" \
+    "  if (gate <= 0.0) return rgb;\n" \
+    "  vec2 p = fract(uv * vec2(u_filter_cols, u_scanline_lines));\n" \
+    "  vec3 o = rgb;\n" \
+    "  if (u_filter == 1 || u_filter == 2) {\n" \
+    "    vec2 e = min(p, 1.0 - p) * vec2(sx, sy);\n" \
+    "    float g = smoothstep(0.0, 1.0, min(e.x, e.y));\n" \
+    "    o = rgb * mix(0.55, 1.0, g);\n" \
+    "    if (u_filter == 2) {\n" \
+    "      float t = p.x * 3.0;\n" \
+    "      vec3 m = vec3(1.0 - clamp(abs(t - 0.5), 0.0, 1.0),\n" \
+    "                    1.0 - clamp(abs(t - 1.5), 0.0, 1.0),\n" \
+    "                    1.0 - clamp(abs(t - 2.5), 0.0, 1.0));\n" \
+    "      o *= mix(vec3(1.0), 0.45 + 0.9 * m, 0.6);\n" \
+    "    }\n" \
+    "  } else {\n" \
+    "    float k = mod(floor(gl_FragCoord.x), 3.0);\n" \
+    "    vec3 mask = k < 1.0 ? vec3(1.0, 0.7, 0.7) : k < 2.0 ? vec3(0.7, 1.0, 0.7) : vec3(0.7, 0.7, 1.0);\n" \
+    "    if (u_filter == 3) {\n" \
+    "      float beam = 0.62 + 0.38 * sin(3.14159265 * p.y);\n" \
+    "      o = rgb * mask * beam * 1.35;\n" \
+    "    } else {\n" \
+    "      o = rgb * mix(vec3(1.0), mask, 0.5) * 1.12;\n" \
+    "    }\n" \
+    "  }\n" \
+    "  return mix(rgb, clamp(o, 0.0, 1.0), gate);\n" \
     "}\n"
 static const char *PRESENT_FS =
     "#version 330\n"
@@ -965,6 +1011,7 @@ static const char *PRESENT_FS =
     "    c = texture(u_tex, uv);\n"
     "  }\n"
     "  c.rgb = psx_scanline(c.rgb, v_uv.y);\n"
+    "  c.rgb = psx_filter(c.rgb, v_uv);\n"
     "  frag = c;\n"
     "}\n";
 static const char *INTERP_FS =
@@ -984,6 +1031,7 @@ static const char *INTERP_FS =
     "  }\n"
     "  vec4 c=mix(prev,curr,alpha);\n"
     "  c.rgb=psx_scanline(c.rgb, v_uv.y);\n"
+    "  c.rgb=psx_filter(c.rgb, v_uv);\n"
     "  frag=c;\n"
     "}\n";
 
@@ -2661,11 +2709,27 @@ static void present_set_scanline(GLint uOn, GLint uStr, GLint uLines,
     if (uOn < 0) return;
     int on = (s_scanline_on && pitch_lines > 0 && disp_lines > 0 && out_h > 0)
                  ? 1 : 0;
+    int fon = (s_screen_filter && pitch_lines > 0 && disp_lines > 0 && out_h > 0)
+                 ? 1 : 0;
     p_glUniform1i(uOn, on);
-    if (!on) return;
+    if (!on && !fon) return;
     if (uStr >= 0)   p_glUniform1f(uStr, s_scanline_strength);
     if (uLines >= 0) p_glUniform1f(uLines, (float)pitch_lines);
     if (uScale >= 0) p_glUniform1f(uScale, (float)out_h / (float)disp_lines);
+}
+
+/* Filtro de tela: mesma regra das scanlines (pitch <= 0 desliga: OSD, bezel,
+ * quadro já composto). pitch_cols/disp_cols fazem o papel das linhas na
+ * horizontal. Deve ser chamado DEPOIS de present_set_scanline. */
+static void present_set_filter(GLint uF, GLint uCols, GLint uXs, int pitch_cols,
+                               int disp_cols, int out_w, int pitch_lines) {
+    if (uF < 0) return;
+    int on = (s_screen_filter && pitch_cols > 0 && disp_cols > 0 && out_w > 0 &&
+              pitch_lines > 0) ? s_screen_filter : 0;
+    p_glUniform1i(uF, on);
+    if (!on) return;
+    if (uCols >= 0) p_glUniform1f(uCols, (float)pitch_cols);
+    if (uXs >= 0)   p_glUniform1f(uXs, (float)out_w / (float)disp_cols);
 }
 #define PRESENT_SCANLINE(pitch, disp, oh)                                   \
     present_set_scanline(s_present_uScanline, s_present_uScanStrength,      \
@@ -2675,6 +2739,17 @@ static void present_set_scanline(GLint uOn, GLint uStr, GLint uLines,
     present_set_scanline(s_interp_uScanline, s_interp_uScanStrength,        \
                          s_interp_uScanLines, s_interp_uScanScale,          \
                          (pitch), (disp), (oh))
+#define PRESENT_FILTER(pc, dc, ow, pl)                                      \
+    present_set_filter(s_present_uFilter, s_present_uFilterCols,            \
+                       s_present_uFilterXScale, (pc), (dc), (ow), (pl))
+#define INTERP_FILTER(pc, dc, ow, pl)                                       \
+    present_set_filter(s_interp_uFilter, s_interp_uFilterCols,              \
+                       s_interp_uFilterXScale, (pc), (dc), (ow), (pl))
+
+void gl_renderer_set_screen_filter(int mode) {
+    s_screen_filter = (mode >= 0 && mode <= 4) ? mode : 0;
+}
+int gl_renderer_get_screen_filter(void) { return s_screen_filter; }
 
 /* Display aspect for the present letterbox. Default 4:3 (native). When a wide
  * aspect is configured the 4:3 frame is stretched into it — paired with the
@@ -2970,6 +3045,12 @@ int gl_renderer_init_context(SDL_Window *win) {
                 p_glGetUniformLocation(s_present_prog, "u_scanline_lines");
             s_present_uScanScale =
                 p_glGetUniformLocation(s_present_prog, "u_scanline_scale");
+            s_present_uFilter =
+                p_glGetUniformLocation(s_present_prog, "u_filter");
+            s_present_uFilterCols =
+                p_glGetUniformLocation(s_present_prog, "u_filter_cols");
+            s_present_uFilterXScale =
+                p_glGetUniformLocation(s_present_prog, "u_filter_xscale");
             s_interp_uScanline =
                 p_glGetUniformLocation(s_interp_prog, "u_scanline");
             s_interp_uScanStrength =
@@ -2978,6 +3059,12 @@ int gl_renderer_init_context(SDL_Window *win) {
                 p_glGetUniformLocation(s_interp_prog, "u_scanline_lines");
             s_interp_uScanScale =
                 p_glGetUniformLocation(s_interp_prog, "u_scanline_scale");
+            s_interp_uFilter =
+                p_glGetUniformLocation(s_interp_prog, "u_filter");
+            s_interp_uFilterCols =
+                p_glGetUniformLocation(s_interp_prog, "u_filter_cols");
+            s_interp_uFilterXScale =
+                p_glGetUniformLocation(s_interp_prog, "u_filter_xscale");
             s_interp_uPrev = p_glGetUniformLocation(s_interp_prog, "u_prev");
             s_interp_uCurr = p_glGetUniformLocation(s_interp_prog, "u_curr");
             s_interp_uAlpha = p_glGetUniformLocation(s_interp_prog, "u_alpha");
@@ -3108,6 +3195,7 @@ void gl_renderer_present(const uint32_t *pixels, int src_w, int src_h, int linea
     /* CPU present texture holds exactly the display rect, so v_uv spans it and
      * pitch == display height == src_h. */
     PRESENT_SCANLINE(src_h, src_h, lh);
+    PRESENT_FILTER(src_w, src_w, lw, src_h);
     if (crop) {
         /* Cropped present keeps left-aligned content; still inset so linear
          * AA does not blend the cut column with undefined border texels. */
@@ -3937,6 +4025,7 @@ static void interp_draw_quad(float alpha, int lx, int ly, int lw, int lh) {
     /* Interp textures hold exactly the display rect (uv_rect is 0..1), so pitch
      * == display height == s_interp_h. */
     INTERP_SCANLINE(s_interp_h, s_interp_h, lh);
+    INTERP_FILTER(s_interp_w, s_interp_w, lw, s_interp_h);
     p_glBindVertexArray(s_present_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     p_glBindVertexArray(0);
@@ -4064,6 +4153,7 @@ static void gl_draw_osd_image(const uint32_t *px, int ow, int oh,
     p_glUniform1i(s_present_uTex, 0);
     present_set_sharp(0, 0, 0, 0, 0);   /* OSD is authored at output res */
     PRESENT_SCANLINE(0, 0, 0);          /* never scanline the host OSD */
+    PRESENT_FILTER(0, 0, 0, 0);
     /* Host OSD bitmaps are top-down (row 0 = top), same as guest CPU
      * present with v_flip=1: uv (0,0)-(1,1). (0,1)-(1,0) was the hold-last
      * cancel for already-oriented captures and made toasts upside-down. */
@@ -4173,6 +4263,7 @@ static void present_target_quad(GLuint tex, int tex_w, int tex_h,
      * v_flip=0 is the already-composed hold-last drawable (scanlines, if any,
      * are already baked) — skip it. */
     PRESENT_SCANLINE(v_flip ? tex_h : 0, v_flip ? h : 0, lh);
+    PRESENT_FILTER(v_flip ? tex_w : 0, v_flip ? w : 0, lw, v_flip ? tex_h : 0);
     /* Half-texel inset: with GL_LINEAR, corner-mapped UVs make the outermost
      * dest pixels blend the border texel with VRAM outside the content rect
      * (visible edge stripe with AA on). Center-mapped UVs keep edge samples
@@ -4238,6 +4329,7 @@ static void present_bezel(int ww, int wh, int lx, int ly, int lw, int lh) {
     p_glUniform1i(s_present_uTex, 0);
     p_glUniform4f(s_present_uUvRect, 0.0f, 0.0f, 1.0f, 1.0f);
     PRESENT_SCANLINE(0, 0, 0);          /* bezel art is not scanlined */
+    PRESENT_FILTER(0, 0, 0, 0);
     p_glBindVertexArray(s_present_vao);
     glDrawArrays(GL_TRIANGLES, 0, 3);
     p_glBindVertexArray(0);

@@ -37,6 +37,9 @@ extern "C" int  psx_cheats_menu_overlay_image(const uint32_t**, int*, int*) { re
 extern "C" void psx_cheats_menu_set_options(const PsxMenuOption*, int) {}
 extern "C" void psx_cheats_menu_set_mode(int) {}
 extern "C" int  psx_ui_lang(void) { return 0; }
+extern "C" int  psx_screen_filter_load(void) { return 0; }
+extern "C" void psx_screen_filter_save(int) {}
+extern "C" const char* psx_screen_filter_label(int, int) { return "NONE"; }
 #else
 
 #include "recomp_cheats.h"
@@ -199,6 +202,11 @@ static int ui_lang(void) {
     return recomp_cheat_lang_from_code(launcher_i18n_language());
 }
 extern "C" int psx_ui_lang(void) { return ui_lang(); }
+extern "C" int psx_screen_filter_load(void) { return recomp_screen_filter_load(); }
+extern "C" void psx_screen_filter_save(int mode) { recomp_screen_filter_save(mode); }
+extern "C" const char* psx_screen_filter_label(int mode, int lang) {
+    return recomp_screen_filter_name_upper(mode, lang);
+}
 static const char* tr(int lang, const char* en, const char* pt, const char* es) {
     return lang == 1 ? pt : lang == 2 ? es : en;
 }
