@@ -6291,9 +6291,13 @@ static void ingame_opt_texfilter_activate(char *msg, int cap) {
                   g_video_texfilter ? "bilinear" : "nearest");
 }
 
-static void ingame_opt_smooth_value(char *out, int cap, int pt) {
-    std::snprintf(out, cap, "%s", g_video_aa ? (pt ? "LIGADO" : "ON")
-                                             : (pt ? "DESLIGADO" : "OFF"));
+static const char *ingame_tr(int lang, const char *en, const char *pt, const char *es) {
+    return lang == 1 ? pt : lang == 2 ? es : en;
+}
+
+static void ingame_opt_smooth_value(char *out, int cap, int lang) {
+    std::snprintf(out, cap, "%s", g_video_aa ? ingame_tr(lang, "ON", "LIGADO", "ACTIVADO")
+                                             : ingame_tr(lang, "OFF", "DESLIGADO", "DESACTIVADO"));
 }
 static void ingame_opt_smooth_activate(char *msg, int cap) {
     g_video_aa = !g_video_aa;
@@ -6339,11 +6343,12 @@ static void ingame_opt_aspect_activate(char *msg, int cap) {
     std::snprintf(msg, cap, "Aspect: %d:%d", num, den);
 }
 
-static void ingame_opt_interp_value(char *out, int cap, int pt) {
+static void ingame_opt_interp_value(char *out, int cap, int lang) {
     if (!g_gl_active)
-        std::snprintf(out, cap, "%s", pt ? "SO NO OPENGL" : "OPENGL ONLY");
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "OPENGL ONLY", "SO NO OPENGL", "SOLO OPENGL"));
     else if (!g_frame_interpolation)
-        std::snprintf(out, cap, "%s", pt ? "PADRAO (60 FPS)" : "DEFAULT (60 FPS)");
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "DEFAULT (60 FPS)", "PADRAO (60 FPS)",
+                                                "POR DEFECTO (60 FPS)"));
     else if (g_frame_interpolation_fps > 0)
         std::snprintf(out, cap, "%d FPS", g_frame_interpolation_fps);
     else if (g_host_refresh_hz > 0.0)
@@ -6402,22 +6407,32 @@ static const PsxMenuOption kIngameOptions[] = {
     { "PROPORCAO DA TELA", "ASPECT RATIO",
       "4:3 E A IMAGEM ORIGINAL, SEM ESTICAR, COM BARRAS PRETAS NOS LADOS EM QUALQUER MONITOR. 16:9 E 21:9 (ULTRAWIDE) ALARGAM A IMAGEM PARA ENCHER A TELA: O JOGO E 2D E SO DESENHA EM 4:3.",
       "4:3 IS THE ORIGINAL PICTURE, NOT STRETCHED, WITH BLACK BARS ON ANY MONITOR. 16:9 AND 21:9 (ULTRAWIDE) WIDEN THE PICTURE TO FILL THE SCREEN: THE GAME IS 2D AND ONLY DRAWS IN 4:3.",
+      "PROPORCION DE PANTALLA",
+      "4:3 ES LA IMAGEN ORIGINAL, SIN ESTIRAR, CON BARRAS NEGRAS EN LOS LADOS EN CUALQUIER MONITOR. 16:9 Y 21:9 (ULTRAWIDE) ENSANCHAN LA IMAGEN PARA LLENAR LA PANTALLA: EL JUEGO ES 2D Y SOLO DIBUJA EN 4:3.",
       ingame_opt_aspect_value, ingame_opt_aspect_activate },
     { "FILTRO DE TEXTURA", "TEXTURE FILTER",
       "NEAREST: PIXELS NITIDOS COMO NO PS1. BILINEAR: TEXTURAS SUAVIZADAS (SO NO OPENGL).",
       "NEAREST: SHARP PIXELS LIKE THE PS1. BILINEAR: SMOOTHED TEXTURES (OPENGL ONLY).",
+      "FILTRO DE TEXTURAS",
+      "NEAREST: PIXELES NITIDOS COMO EN PS1. BILINEAR: TEXTURAS SUAVIZADAS (SOLO OPENGL).",
       ingame_opt_texfilter_value, ingame_opt_texfilter_activate },
     { "SUAVIZAR A IMAGEM NA TELA", "SCREEN SMOOTHING",
       "LIGADO: A IMAGEM FINAL E AMPLIADA COM FILTRO LINEAR. DESLIGADO: AMPLIADA SEM FILTRO (PIXELS QUADRADOS).",
       "ON: THE FINAL PICTURE IS SCALED WITH A LINEAR FILTER. OFF: SCALED WITHOUT FILTERING (SQUARE PIXELS).",
+      "SUAVIZAR LA IMAGEN",
+      "ACTIVADO: LA IMAGEN FINAL SE AMPLIA CON FILTRO LINEAL. DESACTIVADO: SE AMPLIA SIN FILTRO (PIXELES CUADRADOS).",
       ingame_opt_smooth_value, ingame_opt_smooth_activate },
     { "FPS DO MONITOR (INTERPOLACAO)", "MONITOR FPS (INTERPOLATION)",
       "X TROCA: PADRAO (60), MONITOR (DETECTA OS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MISTURA QUADROS PARA SUAVIZAR; O JOGO CONTINUA NA VELOCIDADE NORMAL. USE O VALOR DO SEU MONITOR.",
       "X CYCLES: DEFAULT (60), MONITOR (DETECTS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. BLENDS FRAMES FOR SMOOTHNESS; GAME SPEED IS UNCHANGED. USE YOUR MONITOR RATE.",
+      "FPS DEL MONITOR (INTERPOLACION)",
+      "X CAMBIA: POR DEFECTO (60), MONITOR (DETECTA LOS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MEZCLA FOTOGRAMAS PARA SUAVIZAR; EL JUEGO SIGUE A VELOCIDAD NORMAL. USA EL VALOR DE TU MONITOR.",
       ingame_opt_interp_value, ingame_opt_interp_activate },
     { "VOLTAR AO LAUNCHER", "BACK TO THE LAUNCHER",
       "FECHA O JOGO E ABRE O LAUNCHER. SALVE ANTES: O PROGRESSO NAO SALVO E PERDIDO.",
       "CLOSES THE GAME AND OPENS THE LAUNCHER. SAVE FIRST: UNSAVED PROGRESS IS LOST.",
+      "VOLVER AL LAUNCHER",
+      "CIERRA EL JUEGO Y ABRE EL LAUNCHER. GUARDA ANTES: EL PROGRESO NO GUARDADO SE PIERDE.",
       ingame_opt_launcher_value, ingame_opt_launcher_activate },
 };
 
