@@ -820,13 +820,19 @@ static void gpu_ll_complete(void *opaque, int hit_limit) {
     complete_transfer(2);
 }
 
+static uint32_t gpu_ll_busy_cycles(void *opaque) {
+    (void)opaque;
+    return gpu_draw_busy_cycles();
+}
+
 static const DMAGPULinkedListOps gpu_ll_ops = {
     gpu_ll_resolve_address,
     gpu_ll_read_word,
     gpu_ll_observe_header,
     gpu_ll_begin_node,
     gpu_ll_emit_word,
-    gpu_ll_complete
+    gpu_ll_complete,
+    gpu_ll_busy_cycles
 };
 
 static void start_async_gpu_linked_list(void) {
@@ -890,6 +896,10 @@ static void hold_cpu_for_gpu_linked_list(void) {
     uint32_t steps = 0;
     while (gpu_linked_list.active && ((channels[2].chcr >> 24) & 1u) &&
            channel_enabled(2)) {
+        /* The CPU waits only while DMA moves data. Once the GPU is busy with
+         * the node it was handed, DREQ drops and the CPU runs again; the rest
+         * of the walk continues from the guest cycle clock. */
+        if (dma_gpu_ll_waiting_on_gpu(&gpu_linked_list)) break;
         const uint32_t moved = gpu_linked_list.total_words;
         if((s_host_draw[0].bytes || s_host_draw[1].bytes) &&
            dma_host_draw_drain(&gpu_linked_list,s_host_draw,&gpu_ll_ops,NULL)) {

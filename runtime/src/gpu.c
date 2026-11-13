@@ -7684,8 +7684,150 @@ uint64_t gpu_ws_census_seq(void) { return ws_census_seq; }
 /* Execute a fully-collected GP0 command */
 static void gp0_dispatch_command(uint8_t opcode);
 
+/* ---- Rasteriser busy time ------------------------------------------------
+ * The GPU takes time to draw what it is sent, and while it draws it keeps
+ * DREQ low, so a linked-list DMA (dma_gpu_ll.c) cannot hand it the next node.
+ * Software depends on that: libgpu's DrawOTag returns while the list is still
+ * being drawn and the DMA-complete interrupt arrives later. A game that clears
+ * its "draw finished" flag right after DrawOTag and waits for the DrawSync
+ * callback to set it deadlocks its own frame loop if the whole list completes
+ * inside the kicking store (Valkyrie Profile's battle loop does exactly this).
+ *
+ * Model, cross-checked against mednafen/Beetle's draw-time accounting
+ * (gpu.c / gpu_polygon.c / gpu_sprite.c / gpu_line.c): the rasteriser earns two
+ * time units per CPU clock; a triangle costs a fixed setup plus its pixels
+ * (doubled when shaded or textured, x1.5 when only blended/mask-tested), a
+ * rectangle its pixels (x1.5 when blended/mask-tested), a line two units per
+ * pixel, a fill 46 plus (w/8 + 9) per row, a VRAM copy two per pixel. Pixel
+ * counts here are the primitive's area clipped to the drawing area, in guest
+ * (native) pixels, independent of any host upscale. The exact per-span counts
+ * of the real rasteriser are approximated by the clipped area. */
+static uint64_t s_gpu_busy_until;   /* guest cycle at which the GPU is idle */
+
+static void gpu_draw_time_charge(uint64_t units) {
+    const uint64_t now = psx_cycle_count;
+    if (units == 0) return;
+    if (s_gpu_busy_until < now) s_gpu_busy_until = now;
+    s_gpu_busy_until += (units + 1u) / 2u;
+}
+
+uint32_t gpu_draw_busy_cycles(void) {
+    const uint64_t now = psx_cycle_count;
+    if (s_gpu_busy_until <= now) return 0;
+    const uint64_t left = s_gpu_busy_until - now;
+    /* A deadline further away than a few frames is not a draw cost: it is a
+     * stale value from before a state load or clock reset. */
+    if (left > 4u * 564480u) {
+        s_gpu_busy_until = now;
+        return 0;
+    }
+    return (uint32_t)left;
+}
+
+static int64_t draw_time_clip_span(int64_t lo, int64_t hi, int64_t clip_lo, int64_t clip_hi) {
+    if (lo < clip_lo) lo = clip_lo;
+    if (hi > clip_hi) hi = clip_hi;
+    return hi > lo ? hi - lo : 0;
+}
+
+/* Pixels of the triangle (x,y)[3] (already offset) inside the drawing area. */
+static uint64_t draw_time_tri_pixels(const int32_t *x, const int32_t *y) {
+    int64_t twice = (int64_t)(x[1] - x[0]) * (y[2] - y[0]) -
+                    (int64_t)(x[2] - x[0]) * (y[1] - y[0]);
+    if (twice < 0) twice = -twice;
+    int32_t x0 = x[0], x1 = x[0], y0 = y[0], y1 = y[0];
+    for (int i = 1; i < 3; i++) {
+        if (x[i] < x0) x0 = x[i];
+        if (x[i] > x1) x1 = x[i];
+        if (y[i] < y0) y0 = y[i];
+        if (y[i] > y1) y1 = y[i];
+    }
+    /* The GPU rejects triangles larger than 1023x511. */
+    if (x1 - x0 > 1023 || y1 - y0 > 511) return 0;
+    const int64_t bw = x1 - x0, bh = y1 - y0;
+    if (bw <= 0 || bh <= 0) return 0;
+    const int64_t cw = draw_time_clip_span(x0, x1, (int64_t)draw_area_left,
+                                           (int64_t)draw_area_right + 1);
+    const int64_t ch = draw_time_clip_span(y0, y1, (int64_t)draw_area_top,
+                                           (int64_t)draw_area_bottom + 1);
+    /* Scale the area by the visible share of the bounding box. */
+    return (uint64_t)((twice / 2) * cw / bw * ch / bh);
+}
+
+static uint64_t draw_time_rect_pixels(int32_t x, int32_t y, int32_t w, int32_t h) {
+    const int64_t cw = draw_time_clip_span(x, (int64_t)x + w, (int64_t)draw_area_left,
+                                           (int64_t)draw_area_right + 1);
+    const int64_t ch = draw_time_clip_span(y, (int64_t)y + h, (int64_t)draw_area_top,
+                                           (int64_t)draw_area_bottom + 1);
+    return (uint64_t)(cw * ch);
+}
+
+static void draw_time_vertex(uint32_t word, int32_t *x, int32_t *y) {
+    *x = sign_extend(word & 0x7FFu, 11) + draw_offset_x;
+    *y = sign_extend((word >> 16) & 0x7FFu, 11) + draw_offset_y;
+}
+
+static void gpu_draw_time_command(uint8_t opcode) {
+    const uint32_t *w = gp0_cmd_buf;
+    uint64_t units = 0;
+    if (opcode == 0x02) {                               /* fill rectangle */
+        const uint32_t fw = ((w[2] & 0x3FFu) + 0xFu) & ~0xFu;
+        const uint32_t fh = (w[2] >> 16) & 0x1FFu;
+        units = 46u + (uint64_t)fh * ((fw >> 3) + 9u);
+    } else if (opcode >= 0x20 && opcode <= 0x3F) {      /* polygon */
+        const int gouraud = (opcode & 0x10) != 0, quad = (opcode & 0x08) != 0;
+        const int textured = (opcode & 0x04) != 0, blend = (opcode & 0x02) != 0;
+        const int stride = 1 + textured + gouraud;
+        int32_t vx[4], vy[4];
+        for (int i = 0; i < (quad ? 4 : 3); i++)
+            draw_time_vertex(w[1 + i * stride], &vx[i], &vy[i]);
+        const uint64_t setup = gouraud && textured ? 450u : gouraud ? 288u
+                               : textured ? 180u : 0u;
+        for (int t = 0; t < (quad ? 2 : 1); t++) {
+            const uint64_t px = draw_time_tri_pixels(vx + t, vy + t);
+            units += (t ? 46u : 82u) + setup;
+            if (gouraud || textured) units += px * 2u;
+            else if (blend || check_mask_bit) units += px + (px + 1u) / 2u;
+            else units += px;
+        }
+    } else if (opcode >= 0x40 && opcode <= 0x5F) {      /* line */
+        const int gouraud = (opcode & 0x10) != 0;
+        int32_t x0, y0, x1, y1;
+        draw_time_vertex(w[1], &x0, &y0);
+        draw_time_vertex(w[gouraud ? 3 : 2], &x1, &y1);
+        int32_t dx = x1 - x0, dy = y1 - y0;
+        if (dx < 0) dx = -dx;
+        if (dy < 0) dy = -dy;
+        /* Lines longer than 1023x511 are rejected. Only the first segment of
+         * a polyline is known here; later segments ride on its estimate. */
+        units = 16u;
+        if (dx <= 1023 && dy <= 511) units += 2u * (uint64_t)(dx > dy ? dx : dy);
+    } else if (opcode >= 0x60 && opcode <= 0x7F) {      /* rectangle */
+        const int textured = (opcode & 0x04) != 0, blend = (opcode & 0x02) != 0;
+        int32_t x, y, rw, rh;
+        draw_time_vertex(w[1], &x, &y);
+        switch ((opcode >> 3) & 3) {
+        case 1:  rw = rh = 1; break;
+        case 2:  rw = rh = 8; break;
+        case 3:  rw = rh = 16; break;
+        default: rw = (int32_t)(w[2 + textured] & 0x3FFu);
+                 rh = (int32_t)((w[2 + textured] >> 16) & 0x1FFu); break;
+        }
+        const uint64_t px = draw_time_rect_pixels(x, y, rw, rh);
+        units = 16u + px;
+        if (blend || check_mask_bit) units += (px + 1u) / 2u;
+    } else if (opcode >= 0x80 && opcode <= 0x9F) {      /* VRAM-to-VRAM copy */
+        uint32_t cw = w[3] & 0x3FFu, ch = (w[3] >> 16) & 0x1FFu;
+        if (!cw) cw = 0x400u;
+        if (!ch) ch = 0x200u;
+        units = (uint64_t)cw * ch * 2u;
+    }
+    gpu_draw_time_charge(units);
+}
+
 static void gp0_execute_command(void) {
     uint8_t opcode = (gp0_cmd_buf[0] >> 24) & 0xFF;
+    gpu_draw_time_command(opcode);
     gp0_opcode_count[opcode]++;
     gp0_ring_record(gp0_cmd_buf, gp0_words_needed);
     extern void ws_bg_phase_note(uint32_t op);
@@ -8393,6 +8535,8 @@ static int gpu_snap_emit(PstW *w) {
     /* Depth24 present helpers (MotK FMV) — must resume with upload span. */
     WU(s_d24_upload_x1); WI(s_d24_present_hold | 0x200 | (s_d24_present_skip ? 0x100 : 0));
     WU(s_d24_prev_disp_h);
+    /* Rasteriser busy deadline (guest cycle): GPU DMA pacing depends on it. */
+    if (!pst_w_u64(w, s_gpu_busy_until)) return 0;
 #undef WU
 #undef WI
 #undef WH
@@ -8433,6 +8577,7 @@ static int gpu_snap_parse(PstR *r) {
         ? (s_d24_present_hold & 0x100) != 0
         : (s_d24_present_hold & 0x100) || (s_d24_present_hold & 0xFF) > 0;
     s_d24_present_hold &= 0xFF;
+    if (!pst_r_u64(r, &s_gpu_busy_until)) return 0;
 #undef RU
 #undef RI
 #undef RH

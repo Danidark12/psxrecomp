@@ -11,7 +11,10 @@ enum {
     DMA_GPU_LL_PHASE_IDLE = 0,
     DMA_GPU_LL_PHASE_HEADER = 1,
     DMA_GPU_LL_PHASE_SETUP = 2,
-    DMA_GPU_LL_PHASE_PAYLOAD = 3
+    DMA_GPU_LL_PHASE_PAYLOAD = 3,
+    /* The node's commands are in the GPU and it is still rasterising them:
+     * DREQ is low, no word moves, and the CPU runs. */
+    DMA_GPU_LL_PHASE_BUSY = 4
 };
 
 typedef struct {
@@ -38,7 +41,13 @@ typedef struct {
     int (*begin_node)(void *opaque, uint32_t address, uint32_t word_count);
     void (*emit_word)(void *opaque, uint32_t address, uint32_t word);
     void (*complete)(void *opaque, int hit_limit);
+    /* Guest cycles until the GPU can take the next node (0 = ready now).
+     * Optional: NULL means the GPU is always ready. */
+    uint32_t (*busy_cycles)(void *opaque);
 } DMAGPULinkedListOps;
+
+/* 1 while the walker is waiting on the GPU instead of moving a word. */
+int dma_gpu_ll_waiting_on_gpu(const DMAGPULinkedList *state);
 
 void dma_gpu_ll_start(DMAGPULinkedList *state, uint32_t start_addr,
                       uint32_t max_nodes);

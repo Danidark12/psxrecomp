@@ -46,6 +46,10 @@ typedef struct {
 } GpuDisplayInfo;
 
 void gpu_get_display_info(GpuDisplayInfo* out);
+
+/* Guest cycles until the rasteriser has finished the commands it was sent
+ * (0 = idle). DREQ-paced GPU DMA waits this long before the next node. */
+uint32_t gpu_draw_busy_cycles(void);
 /* Render-pass GPU register checkpoint (render_pass.c). One at a time. */
 int gpu_pass_checkpoint_save(void);
 void gpu_pass_checkpoint_restore(void);
