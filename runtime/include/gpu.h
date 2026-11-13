@@ -44,6 +44,10 @@ typedef struct {
 
 void gpu_get_display_info(GpuDisplayInfo* out);
 
+/* Guest cycles until the rasteriser has finished the commands it was sent
+ * (0 = idle). DREQ-paced GPU DMA waits this long before the next node. */
+uint32_t gpu_draw_busy_cycles(void);
+
 /* Perspective-correct UV arming rate, per condition. armed/attempts is the
  * real perspective coverage: attempts counts only textured triangles, so it is
  * the denominator that gp0_draw (which includes untextured primitives that are

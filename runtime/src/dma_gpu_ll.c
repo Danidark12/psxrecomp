@@ -39,6 +39,10 @@ void dma_gpu_ll_cancel(DMAGPULinkedList *state) {
     memset(state, 0, sizeof(*state));
 }
 
+int dma_gpu_ll_waiting_on_gpu(const DMAGPULinkedList *state) {
+    return state->active && state->phase == DMA_GPU_LL_PHASE_BUSY;
+}
+
 uint32_t dma_gpu_ll_cycles_to_event(const DMAGPULinkedList *state) {
     if (!state->active) return UINT32_MAX;
     return state->cycles_remaining ? state->cycles_remaining : 1u;
@@ -118,9 +122,28 @@ void dma_gpu_ll_advance(DMAGPULinkedList *state, uint32_t cycles,
                 finish(state, ops, opaque);
                 return;
             } else {
-                state->phase = DMA_GPU_LL_PHASE_HEADER;
+                /* GPU DMA is DREQ-paced (PSX-SPX "DMA Channels", SyncMode 2):
+                 * the next node moves only once the GPU has finished the
+                 * commands of this one. Until then no word is transferred and
+                 * the CPU is not stopped. */
+                uint32_t busy = ops->busy_cycles ? ops->busy_cycles(opaque) : 0u;
                 state->current_addr = resolve_address(
                     ops, opaque, state->next_addr);
+                if (busy) {
+                    state->phase = DMA_GPU_LL_PHASE_BUSY;
+                    state->cycles_remaining = busy;
+                } else {
+                    state->phase = DMA_GPU_LL_PHASE_HEADER;
+                    state->cycles_remaining = DMA_GPU_LL_HEADER_CYCLES;
+                }
+            }
+        } else if (state->phase == DMA_GPU_LL_PHASE_BUSY) {
+            /* The wait elapsed; re-ask in case more work was queued since. */
+            uint32_t busy = ops->busy_cycles ? ops->busy_cycles(opaque) : 0u;
+            if (busy) {
+                state->cycles_remaining = busy;
+            } else {
+                state->phase = DMA_GPU_LL_PHASE_HEADER;
                 state->cycles_remaining = DMA_GPU_LL_HEADER_CYCLES;
             }
         } else {
