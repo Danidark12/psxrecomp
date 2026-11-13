@@ -691,9 +691,9 @@ static RuntimeConfig parse_runtime_block(const toml::value& cfg, const fs::path&
             rt.video_frame_interpolation_fps =
                 toml::find<int>(video, "frame_interpolation_fps");
             if (rt.video_frame_interpolation_fps != 0 &&
-                rt.video_frame_interpolation_fps < 90)
+                rt.video_frame_interpolation_fps < 60)
                 throw std::runtime_error(
-                    "[video] frame_interpolation_fps must be 0 (display) or >= 90");
+                    "[video] frame_interpolation_fps must be 0 (display) or >= 60");
         }
         if (video.contains("offer_frame_interpolation")) {
             rt.video_offer_frame_interpolation =
@@ -2357,7 +2357,7 @@ UserSettings load_user_settings(const fs::path& path) {
         });
         if (v.contains("frame_interpolation_fps")) try_get([&]{
             s.frame_interpolation_fps = toml::find<int>(v, "frame_interpolation_fps");
-            if (s.frame_interpolation_fps == 0 || s.frame_interpolation_fps >= 90)
+            if (s.frame_interpolation_fps == 0 || s.frame_interpolation_fps >= 60)
                 s.has_frame_interpolation_fps = true;
         });
         if (v.contains("aspect_ratio")) try_get([&]{

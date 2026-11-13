@@ -2901,6 +2901,14 @@ static void refresh_host_display_cadence(int force_log, int force_probe) {
         std::printf("psxrecomp: host refresh unknown; keeping %.2f Hz pacing\n",
                     g_frame_period_ms > 0.0 ? 1000.0 / g_frame_period_ms : 0.0);
     }
+    /* "FPS do monitor" segue a taxa detectada: ao trocar de monitor ou de
+     * modo de vídeo, a interpolação passa a usar a nova taxa. */
+    if (g_gl_active && g_frame_interpolation && g_frame_interpolation_fps == 0)
+        gl_renderer_set_interpolation(1, g_host_refresh_hz, 0.0,
+                                      g_guest_frame_period_ms > 0.0
+                                          ? 1000.0 / g_guest_frame_period_ms
+                                          : 59.94,
+                                      g_frame_interpolation_blend);
     apply_present_cadence();
 #else
     (void)force_log;
@@ -6348,8 +6356,22 @@ static void ingame_opt_interp_activate(char *msg, int cap) {
         std::snprintf(msg, cap, "Monitor FPS needs the OpenGL renderer");
         return;
     }
-    g_frame_interpolation = g_frame_interpolation ? 0 : 1;
-    if (g_frame_interpolation) g_frame_interpolation_fps = 0;   /* taxa do monitor */
+    static const int kRates[] = { 0, 75, 100, 120, 144, 165, 180, 200, 240, 360 };
+    const int n = (int)(sizeof(kRates) / sizeof(kRates[0]));
+    if (!g_frame_interpolation) {
+        g_frame_interpolation = 1;
+        g_frame_interpolation_fps = 0;              /* taxa do monitor */
+    } else {
+        int idx = 0;
+        for (int i = 0; i < n; ++i)
+            if (kRates[i] == g_frame_interpolation_fps) { idx = i; break; }
+        if (idx + 1 >= n) {
+            g_frame_interpolation = 0;              /* depois de 360: desliga */
+            g_frame_interpolation_fps = 0;
+        } else {
+            g_frame_interpolation_fps = kRates[idx + 1];
+        }
+    }
     gl_renderer_set_interpolation(g_frame_interpolation, g_host_refresh_hz,
                                   (double)g_frame_interpolation_fps,
                                   g_frame_period_ms > 0.0
@@ -6357,7 +6379,13 @@ static void ingame_opt_interp_activate(char *msg, int cap) {
                                   g_frame_interpolation_blend);
     apply_present_cadence();
     ingame_options_persist();
-    std::snprintf(msg, cap, "Monitor FPS: %s", g_frame_interpolation ? "on" : "off");
+    if (!g_frame_interpolation)
+        std::snprintf(msg, cap, "Monitor FPS: off");
+    else if (g_frame_interpolation_fps > 0)
+        std::snprintf(msg, cap, "Monitor FPS: %d", g_frame_interpolation_fps);
+    else
+        std::snprintf(msg, cap, "Monitor FPS: monitor rate (%d Hz)",
+                      (int)(g_host_refresh_hz + 0.5));
 }
 
 static int g_ingame_launcher_requested = 0;
@@ -6384,8 +6412,8 @@ static const PsxMenuOption kIngameOptions[] = {
       "ON: THE FINAL PICTURE IS SCALED WITH A LINEAR FILTER. OFF: SCALED WITHOUT FILTERING (SQUARE PIXELS).",
       ingame_opt_smooth_value, ingame_opt_smooth_activate },
     { "FPS DO MONITOR (INTERPOLACAO)", "MONITOR FPS (INTERPOLATION)",
-      "MOSTRA QUADROS INTERMEDIARIOS ATE A TAXA DO MONITOR, MISTURANDO O QUADRO ANTERIOR COM O ATUAL. O JOGO CONTINUA NA VELOCIDADE NORMAL. PODE DEIXAR UM LEVE RASTRO.",
-      "SHOWS IN-BETWEEN FRAMES UP TO THE MONITOR RATE BY BLENDING THE PREVIOUS AND CURRENT FRAME. GAME SPEED IS UNCHANGED. MAY LEAVE A SLIGHT TRAIL.",
+      "X TROCA: DESLIGADO, MONITOR (DETECTA OS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. MISTURA QUADROS PARA SUAVIZAR; O JOGO CONTINUA NA VELOCIDADE NORMAL. USE O VALOR DO SEU MONITOR.",
+      "X CYCLES: OFF, MONITOR (DETECTS HZ), 75, 100, 120, 144, 165, 180, 200, 240, 360. BLENDS FRAMES FOR SMOOTHNESS; GAME SPEED IS UNCHANGED. USE YOUR MONITOR RATE.",
       ingame_opt_interp_value, ingame_opt_interp_activate },
     { "VOLTAR AO LAUNCHER", "BACK TO THE LAUNCHER",
       "FECHA O JOGO E ABRE O LAUNCHER. SALVE ANTES: O PROGRESSO NAO SALVO E PERDIDO.",
@@ -6560,6 +6588,62 @@ static void fast_forward_toggle_flip(void) {
     else
         snprintf(msg, sizeof(msg), "Fast forward: %dx (locked)", mult);
     host_osd_push(msg, 900);
+}
+
+/* ---- Quick save / quick load e velocidade do avanço rápido ----------------
+ * Quick save grava no espaço escolhido por último no menu de save states
+ * (começa no espaço 1); quick load carrega desse mesmo espaço.
+ *   Teclado: F2 salva, F3 carrega, F10 diminui e F11 aumenta a velocidade.
+ *   Controle: Select+R2 salva, Select+L2 carrega, Select+Esquerda/Direita
+ *   ajustam a velocidade. */
+static void ingame_options_persist(void);
+
+static void quick_state(int save) {
+    if (savestate_menu_open || psx_rewind_is_open())
+        return;
+    char msg[48];
+    if (savestate_submit_slot(savestate_menu_slot, save)) {
+        snprintf(msg, sizeof(msg), save ? "Quick save: slot %d" : "Quick load: slot %d",
+                 savestate_menu_slot + 1);
+        host_osd_push(msg, 1200);
+    }
+}
+
+static const int kFastForwardSteps[] = { 2, 3, 4, 6, 8, 12, 16, 0 /* max */ };
+
+static void fast_forward_speed_step(int dir) {
+    const int n = (int)(sizeof(kFastForwardSteps) / sizeof(kFastForwardSteps[0]));
+    int idx = 2;   /* 4x */
+    for (int i = 0; i < n; ++i)
+        if (kFastForwardSteps[i] == g_fast_forward_speed) { idx = i; break; }
+    idx += dir;
+    if (idx < 0) idx = 0;
+    if (idx >= n) idx = n - 1;
+    g_fast_forward_speed = kFastForwardSteps[idx];
+    ingame_options_persist();
+    char msg[48];
+    if (g_fast_forward_speed == 0)
+        snprintf(msg, sizeof(msg), "Fast forward speed: max");
+    else
+        snprintf(msg, sizeof(msg), "Fast forward speed: %dx", g_fast_forward_speed);
+    host_osd_push(msg, 1200);
+}
+
+static void quick_hotkeys_poll_buttons(void) {
+    static int prev_qs, prev_ql, prev_l, prev_r;
+    int qs = 0, ql = 0, l = 0, r = 0;
+    SDL_GameController *h = g_players[0].handle;
+    if (h && SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_BACK)) {
+        qs = SDL_GameControllerGetAxis(h, SDL_CONTROLLER_AXIS_TRIGGERRIGHT) > 16000;
+        ql = SDL_GameControllerGetAxis(h, SDL_CONTROLLER_AXIS_TRIGGERLEFT) > 16000;
+        l = SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_LEFT);
+        r = SDL_GameControllerGetButton(h, SDL_CONTROLLER_BUTTON_DPAD_RIGHT);
+    }
+    if (qs && !prev_qs) quick_state(1);
+    if (ql && !prev_ql) quick_state(0);
+    if (l && !prev_l) fast_forward_speed_step(-1);
+    if (r && !prev_r) fast_forward_speed_step(+1);
+    prev_qs = qs; prev_ql = ql; prev_l = l; prev_r = r;
 }
 
 static void fast_forward_toggle_poll_buttons(void) {
@@ -6985,6 +7069,14 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
                                                  (int)mod)) {
                     cheats_menu_toggle(key);
                 }
+                else if (!key_repeat && !((int)mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT)) &&
+                         (key == SDLK_F2 || key == SDLK_F3)) {
+                    quick_state(key == SDLK_F2);
+                }
+                else if (!((int)mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT)) &&
+                         (key == SDLK_F10 || key == SDLK_F11)) {
+                    fast_forward_speed_step(key == SDLK_F11 ? +1 : -1);
+                }
                 else if (!key_repeat && key == SDLK_F4 &&
                          !((int)mod & (KMOD_ALT | KMOD_CTRL | KMOD_SHIFT))) {
                     cheats_menu_toggle_mode(key, 1);
@@ -7059,6 +7151,7 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
         }
         savestate_menu_poll_toggle_buttons();
         cheats_menu_poll_toggle_buttons();
+        quick_hotkeys_poll_buttons();
         rewind_poll_toggle_buttons();
         fast_forward_toggle_poll_buttons();
         psx_rewind_note_frame();
@@ -11380,6 +11473,8 @@ static void ingame_options_persist(void) {
     us.has_frame_interpolation = true;
     us.frame_interpolation_fps = g_frame_interpolation_fps;
     us.has_frame_interpolation_fps = true;
+    us.fast_forward_speed = g_fast_forward_speed;
+    us.has_fast_forward_speed = true;
     PSXRecompV4::save_user_settings(g_lnch_settings_path, us);
 }
 #endif
