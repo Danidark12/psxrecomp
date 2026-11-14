@@ -70,6 +70,7 @@ struct BinSegment {
     uint32_t      start_lba;     // first disc-relative sector of this file
     uint32_t      sector_count;  // sectors stored in this file
     bool          raw;           // 2352-byte raw sectors (BIN) vs 2048 (ISO)
+    std::vector<uint8_t> mem;    // whole file, when "load disc into RAM" is on
 };
 
 class ISOReader {
