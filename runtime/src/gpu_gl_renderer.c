@@ -3181,8 +3181,13 @@ void gl_renderer_present(const uint32_t *pixels, int src_w, int src_h, int linea
     int crop = (content_w > 0 && content_w < src_w && src_w > 0);
     if (crop) {
         uv_x1 = (float)content_w / (float)src_w;
+        const int full_lw = lw;
         lw = (lw * content_w) / src_w;
         if (lw < 1) lw = 1;
+        /* Com moldura, a faixa preta só à direita fica visível contra a arte:
+         * centraliza o vídeo (sem esticar) para sobrar a mesma borda dos dois
+         * lados. Sem moldura, mantém o alinhamento à esquerda de sempre. */
+        if (s_bezel_tex) lx += (full_lw - lw) / 2;
     }
     /* This is the low-res source path (24-bit FMV, and the forced-CPU present
      * diagnostic): a 320x192-class image blown up to fill the window, so how it
