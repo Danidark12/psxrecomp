@@ -52,6 +52,9 @@ uint32_t gpu_draw_busy_cycles(void);
  * real perspective coverage: attempts counts only textured triangles, so it is
  * the denominator that gp0_draw (which includes untextured primitives that are
  * correctly never armed) cannot provide. Diagnostic; any pointer may be NULL. */
+void gpu_texcorr_ring_frame_tick(void);
+uint32_t gpu_texcorr_ring_get(uint32_t back, uint32_t *xy, uint16_t *z,
+                              uint32_t *cmd, uint32_t *frame, uint32_t *uv);
 void gpu_texture_correction_stats(uint64_t *attempts, uint64_t *armed,
                                   uint64_t *no_correction,
                                   uint64_t *no_source, uint64_t *no_depth);
