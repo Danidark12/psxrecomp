@@ -2966,6 +2966,7 @@ void gpu_vblank_flush_present(void) {
 }
 
 void gpu_vblank_tick(void) {
+    gpu_texcorr_ring_frame_tick();
     lcf ^= 1;
     /* GPUSTAT.13 (interlace FIELD): on real hardware this alternates per
      * field while GP1(08h) vertical interlace is on, in antiphase with the
@@ -3428,6 +3429,25 @@ void gpu_texture_correction_stats(uint64_t *attempts, uint64_t *armed,
     if (no_depth)      *no_depth      = s_texcorr.no_depth;
 }
 
+/* Ring of the last armed perspective triangles (debug server "texcorr_dump"):
+ * packed SXY words, SZ depths, GP0 command word and the frame they drew in. */
+#define TEXCORR_RING 4096u
+typedef struct { uint32_t xy[3]; uint16_t z[3]; uint32_t cmd; uint32_t frame; uint32_t uv[3]; } TexcorrRec;
+static TexcorrRec s_tc_ring[TEXCORR_RING];
+static uint32_t   s_tc_ring_n = 0;
+static uint32_t   s_tc_frame = 0;
+void gpu_texcorr_ring_frame_tick(void) { s_tc_frame++; }
+uint32_t gpu_texcorr_ring_get(uint32_t back, uint32_t *xy, uint16_t *z,
+                              uint32_t *cmd, uint32_t *frame, uint32_t *uv) {
+    uint32_t have = s_tc_ring_n < TEXCORR_RING ? s_tc_ring_n : TEXCORR_RING;
+    if (back >= have) return 0;
+    const TexcorrRec *r = &s_tc_ring[(s_tc_ring_n - 1u - back) % TEXCORR_RING];
+    for (int i = 0; i < 3; i++) { xy[i] = r->xy[i]; z[i] = r->z[i]; }
+    *cmd = r->cmd; *frame = r->frame;
+    if (uv) for (int i = 0; i < 3; i++) uv[i] = r->uv[i];
+    return 1;
+}
+
 /* Enable perspective UVs only when every position word came from an exact
  * SWC2 projection store at that same DMA packet address. This preserves the
  * association through ordering-table reordering and rejects CPU-built UI. */
@@ -3452,6 +3472,12 @@ static void prepare_texture_triangle(int i0, int i1, int i2) {
     if (q[2] > qmax) qmax = q[2];
     if (qmax <= 0.0f) { s_texcorr.no_depth++; return; }
     s_texcorr.armed++;
+    {
+        TexcorrRec *r = &s_tc_ring[s_tc_ring_n++ % TEXCORR_RING];
+        for (int i = 0; i < 3; i++) { r->xy[i] = gp0_cmd_buf[indices[i]]; r->z[i] = z[i]; r->uv[i] = gp0_cmd_buf[indices[i] + 1]; }
+        r->cmd = gp0_cmd_buf[0];
+        r->frame = s_tc_frame;
+    }
     gr_set_perspective_triangle(1, q[0] / qmax, q[1] / qmax, q[2] / qmax);
 }
 

@@ -5270,6 +5270,32 @@ static void handle_geom_correction(int id, const char *json)
  * without a rebuild: {"cmd":"pgxp","cpu_mode":0|1,"tolerance":F}. Fields are
  * optional; the reply echoes the resulting state (same shape as
  * geom_correction's "pgxp" object, flattened). */
+/* texcorr_dump {"count":N}: last N triangles that got perspective-correct
+ * UVs — packed SXY, SZ depth, GP0 command word, vblank frame. */
+static void handle_texcorr_dump(int id, const char *json) {
+    int count = json_get_int(json, "count", 256);
+    if (count < 1) count = 1;
+    if (count > 4096) count = 4096;
+    static char buf[4096 * 128 + 256];
+    int pos = snprintf(buf, sizeof buf, "{\"id\":%d,\"ok\":true,\"entries\":[", id);
+    int first = 1;
+    for (int b = count - 1; b >= 0; b--) {
+        uint32_t xy[3], cmd, frame, uv[3]; uint16_t z[3];
+        if (!gpu_texcorr_ring_get((uint32_t)b, xy, z, &cmd, &frame, uv)) continue;
+        pos += snprintf(buf + pos, sizeof buf - pos,
+            "%s[%u,\"%08X\",%d,%d,%u,%d,%d,%u,%d,%d,%u,\"%08X\",\"%08X\",\"%08X\"]", first ? "" : ",",
+            frame, cmd,
+            (int16_t)(xy[0] & 0xFFFF), (int16_t)(xy[0] >> 16), z[0],
+            (int16_t)(xy[1] & 0xFFFF), (int16_t)(xy[1] >> 16), z[1],
+            (int16_t)(xy[2] & 0xFFFF), (int16_t)(xy[2] >> 16), z[2],
+            uv[0], uv[1], uv[2]);
+        first = 0;
+        if (pos > (int)sizeof buf - 256) break;
+    }
+    pos += snprintf(buf + pos, sizeof buf - pos, "]}");
+    debug_server_send_line(buf);
+}
+
 static void handle_pgxp(int id, const char *json)
 {
     /* Live toggles for the one-toggle-at-a-time A/B protocol (docs/ENHANCEMENTS.md
@@ -13613,6 +13639,7 @@ static const CmdEntry s_commands[] = {
     { "gpu_state",         handle_gpu_state },
     { "geom_correction",   handle_geom_correction },
     { "pgxp",              handle_pgxp },
+    { "texcorr_dump",      handle_texcorr_dump },
     { "ws_aspect_cone_site", handle_ws_aspect_cone_site },
     { "ws_margin",         handle_ws_margin },
     { "ws_hud_mode",       handle_ws_hud_mode },
