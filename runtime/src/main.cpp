@@ -5957,8 +5957,15 @@ static void depth24_cutover_tick(int depth24) {
  *
  * Optional short cutover blank: full-frame black for 1–2 presents on movie
  * start / long idle resume only (see depth24_cutover_tick). */
+/* Colunas pretas no fim da linha deste quadro de FMV (margem acima), para o
+ * present poder desenhar o vídeo sem elas e centralizado quando há moldura. */
+static bool     s_d24_margin_valid = false;
+static uint32_t s_d24_margin_cols = 0;
+static uint32_t s_d24_margin_w = 0;
+
 static void depth24_fix_trailing_margin(uint32_t *buf, uint32_t w, uint32_t h,
                                           uint32_t display_x) {
+    s_d24_margin_valid = false;
     if (!buf || w < 8u || h == 0u) return;
 
     if (s_d24_cutover_blank > 0) {
@@ -5979,6 +5986,9 @@ static void depth24_fix_trailing_margin(uint32_t *buf, uint32_t w, uint32_t h,
         for (uint32_t x = start; x < w; x++)
             buf[y * w + x] = 0xFF000000u;
     }
+    s_d24_margin_valid = true;
+    s_d24_margin_cols = w - start;
+    s_d24_margin_w = w;
 }
 
 /* Compose visible depth24 rows into the PAL/NTSC active canvas. Decode only
@@ -8197,9 +8207,18 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
          * right-edge jump the old comment describes is 0 with filtering on.
          * Set video AA off to get nearest back. */
         gl_renderer_set_fmv_filter(g_video_fmv_filter);
+        /* FMV 24-bit: informa a largura sem a margem preta do fim da linha.
+         * Sem moldura o resultado é idêntico (mesma escala, alinhado à
+         * esquerda); com moldura o renderer centraliza o vídeo. */
+        int fmv_content_w = 0;
+        if (s_d24_margin_valid && pin_43 && active_scale == 1 &&
+            !local_viewport_crop_applied && s_d24_margin_w == present_w &&
+            s_d24_margin_cols > 0 && s_d24_margin_cols < present_w)
+            fmv_content_w = src_w - (int)s_d24_margin_cols;
+        s_d24_margin_valid = false;
         gl_renderer_present(sdl_pixel_buf, src_w, src_h,
                             g_video_aa ? 1 : 0,
-                            pin_43 ? 1 : 0, 0 /* full width */);
+                            pin_43 ? 1 : 0, fmv_content_w);
         netplay_note_present();
     } else {
     if ((!sdl_renderer || !sdl_texture) && ensure_sw_sdl_present() != 0)
