@@ -1493,12 +1493,32 @@ extern "C" int psx_mod_set_auto_skip_fmv(int enabled) {
     return 1;
 }
 
+/* Molduras no menu F4: com o mod Bezel ligado, o jogador pode trocar a imagem
+ * (ou desligá-la) dentro do jogo. A escolha fica em bezel_choice.txt ao lado do
+ * exe, junto com a imagem que o launcher tinha escolhido; se o launcher mudar
+ * a imagem depois, a escolha do launcher volta a valer. */
+static bool        g_bezel_mod_on = false;
+static bool        g_bezel_off = false;
+static std::string g_bezel_launcher_path;
+static void bezel_choice_restore(void);
+
+extern "C" void psx_mod_bezel_feature_on(void) {
+    if (!g_bezel_mod_on) {
+        g_bezel_mod_on = true;
+        bezel_choice_restore();
+    }
+}
+
 extern "C" int psx_mod_set_bezel_artwork(const char* path) {
     if (!path || !path[0]) {
         std::fprintf(stderr, "psxrecomp: mod rejected empty bezel artwork path\n");
         return 0;
     }
     g_bezel_path = path;
+    g_bezel_launcher_path = path;
+    g_bezel_mod_on = true;
+    g_bezel_off = false;
+    bezel_choice_restore();
     g_video_renderer = 1;
     std::fprintf(stdout, "psxrecomp: mod selected bezel artwork %s\n",
                  g_bezel_path.c_str());
@@ -6482,6 +6502,168 @@ static void ingame_opt_filter_activate(char *msg, int cap) {
     std::snprintf(msg, cap, "%s", psx_screen_filter_label(next, psx_ui_lang()));
 }
 
+/* ---- Molduras (mod Bezel) no menu F4 ------------------------------------ */
+static std::filesystem::path bezel_choice_file(void) {
+    return exe_dir_from_argv(nullptr) / "bezel_choice.txt";
+}
+static FILE *bezel_fopen(const std::filesystem::path &p, const char *mode) {
+#ifdef _WIN32
+    std::wstring wm(mode, mode + std::strlen(mode));
+    return _wfopen(p.wstring().c_str(), wm.c_str());
+#else
+    return std::fopen(p.string().c_str(), mode);
+#endif
+}
+static bool bezel_file_exists(const std::string &p) {
+    std::error_code ec;
+    return !p.empty() && std::filesystem::is_regular_file(std::filesystem::path(p), ec);
+}
+/* Lê bezel_choice.txt: linha 1 = imagem do launcher quando a escolha foi
+ * feita; linha 2 = "off" ou o caminho escolhido no jogo. */
+static void bezel_choice_restore(void) {
+    FILE *f = bezel_fopen(bezel_choice_file(), "rb");
+    if (!f) return;
+    char base[2048] = "", pick[2048] = "";
+    if (!std::fgets(base, sizeof base, f)) base[0] = 0;
+    if (!std::fgets(pick, sizeof pick, f)) pick[0] = 0;
+    std::fclose(f);
+    auto trim = [](char *t) { size_t n = std::strlen(t);
+        while (n && (t[n-1] == '\n' || t[n-1] == '\r')) t[--n] = 0; };
+    trim(base); trim(pick);
+    if (g_bezel_launcher_path != base) return;      /* launcher mudou: vale ele */
+    if (std::strcmp(pick, "off") == 0) { g_bezel_off = true; return; }
+    if (bezel_file_exists(pick)) { g_bezel_path = pick; g_bezel_off = false; }
+}
+static void bezel_choice_save(void) {
+    FILE *f = bezel_fopen(bezel_choice_file(), "wb");
+    if (!f) return;
+    std::fprintf(f, "%s\n%s\n", g_bezel_launcher_path.c_str(),
+                 g_bezel_off ? "off" : g_bezel_path.c_str());
+    std::fclose(f);
+}
+/* Carrega a imagem atual no renderer OpenGL (ou tira a moldura). */
+static bool bezel_apply_current(void) {
+    if (!g_gl_active) return false;
+    if (g_bezel_off || g_bezel_path.empty()) { gl_renderer_set_bezel(nullptr, 0, 0); return true; }
+    std::vector<unsigned char> file;
+    if (FILE *bf = bezel_fopen(std::filesystem::path(g_bezel_path), "rb")) {
+        std::fseek(bf, 0, SEEK_END);
+        const long len = std::ftell(bf);
+        std::fseek(bf, 0, SEEK_SET);
+        if (len > 0) {
+            file.resize((size_t)len);
+            if (std::fread(file.data(), 1, file.size(), bf) != file.size()) file.clear();
+        }
+        std::fclose(bf);
+    }
+    int bw = 0, bh = 0, bc = 0;
+    unsigned char *px = file.empty() ? nullptr
+        : stbi_load_from_memory(file.data(), (int)file.size(), &bw, &bh, &bc, 4);
+    if (!px) {
+        std::fprintf(stdout, "psxrecomp: bezel artwork not loaded: %s\n", g_bezel_path.c_str());
+        gl_renderer_set_bezel(nullptr, 0, 0);
+        return false;
+    }
+    const int uploaded = gl_renderer_set_bezel(px, bw, bh);
+    stbi_image_free(px);
+    std::fprintf(stdout, "psxrecomp: bezel artwork %dx%d from %s%s\n", bw, bh, g_bezel_path.c_str(),
+                 uploaded ? "" : " (GL raster unavailable: not shown)");
+    return true;
+}
+/* Imagens candidatas (relidas a cada troca, então dá para colocar imagens novas
+ * com o jogo aberto): pasta da imagem do launcher, pasta "molduras", pasta
+ * atual e pasta do exe. */
+static std::vector<std::string> bezel_candidates(void) {
+    namespace fs = std::filesystem;
+    std::vector<fs::path> dirs;
+    std::error_code ec;
+    if (!g_bezel_launcher_path.empty()) dirs.push_back(fs::path(g_bezel_launcher_path).parent_path());
+    dirs.push_back(fs::current_path(ec) / "molduras");   /* pasta própria p/ imagens */
+    dirs.push_back(exe_dir_from_argv(nullptr) / "molduras");
+    dirs.push_back(fs::current_path(ec));
+    dirs.push_back(exe_dir_from_argv(nullptr));
+    std::vector<std::string> out;
+    std::vector<fs::path> seen_dirs;
+    for (const fs::path &d : dirs) {
+        if (d.empty()) continue;
+        fs::path canon = fs::weakly_canonical(d, ec);
+        bool dup = false;
+        for (const fs::path &x : seen_dirs) if (x == canon) dup = true;
+        if (dup) continue;
+        seen_dirs.push_back(canon);
+        std::vector<std::string> here;
+        for (fs::directory_iterator it(d, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            std::string ext = it->path().extension().string();
+            for (char &c : ext) c = (char)std::tolower((unsigned char)c);
+            if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp")
+                here.push_back(it->path().string());
+        }
+        std::sort(here.begin(), here.end());
+        for (std::string &h : here) out.push_back(h);
+    }
+    return out;
+}
+static void ingame_opt_bezel_value(char *out, int cap, int lang) {
+    if (!g_bezel_mod_on) {
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "ENABLE THE MOD", "ATIVE O MOD", "ACTIVA EL MOD"));
+        return;
+    }
+    if (!g_gl_active) {
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "OPENGL ONLY", "SO NO OPENGL", "SOLO OPENGL"));
+        return;
+    }
+    if (g_bezel_off || g_bezel_path.empty()) {
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "OFF", "DESLIGADA", "DESACTIVADO"));
+        return;
+    }
+    std::string name = std::filesystem::path(g_bezel_path).stem().string();
+    for (char &c : name) {
+        c = (char)std::toupper((unsigned char)c);
+        if (c == '_' || c == '-') c = ' ';
+    }
+    if ((int)name.size() > 26) name = name.substr(0, 25) + "~";
+    std::snprintf(out, cap, "%s", name.c_str());
+}
+static void ingame_opt_bezel_activate(char *msg, int cap) {
+    if (!g_bezel_mod_on) {
+        std::snprintf(msg, cap, "Enable the Bezel Artwork mod in the launcher");
+        return;
+    }
+    if (!g_gl_active) {
+        std::snprintf(msg, cap, "Frames need the OpenGL renderer");
+        return;
+    }
+    const std::vector<std::string> list = bezel_candidates();
+    if (list.empty()) {
+        std::snprintf(msg, cap, "No frame images (.png/.jpg) found");
+        return;
+    }
+    /* Ordem: imagem 1 -> 2 -> ... -> desligada -> imagem 1. */
+    int cur = -1;
+    if (!g_bezel_off && !g_bezel_path.empty()) {
+        std::error_code ec;
+        for (size_t i = 0; i < list.size(); i++)
+            if (std::filesystem::equivalent(list[i], g_bezel_path, ec)) { cur = (int)i; break; }
+    }
+    int next;
+    if (g_bezel_off) next = 0;
+    else if (cur < 0) next = 0;
+    else next = cur + 1;                      /* == size -> desligada */
+    if (next >= (int)list.size()) {
+        g_bezel_off = true;
+    } else {
+        g_bezel_off = false;
+        g_bezel_path = list[(size_t)next];
+    }
+    bezel_apply_current();
+    bezel_choice_save();
+    if (g_bezel_off)
+        std::snprintf(msg, cap, "Frame off");
+    else
+        std::snprintf(msg, cap, "Frame %d/%d", next + 1, (int)list.size());
+}
+
 static void ingame_opt_scan_value(char *out, int cap, int lang) {
     if (!g_gl_active) {
         std::snprintf(out, cap, "%s", ingame_tr(lang, "OPENGL ONLY", "SO NO OPENGL", "SOLO OPENGL"));
@@ -6536,6 +6718,12 @@ static const PsxMenuOption kIngameOptions[] = {
       "FILTRO DE PANTALLA",
       "LCD: REJILLA OSCURA ENTRE LOS PIXELES, COMO UNA PORTATIL. LCD RGB: CON SUBPIXELES DE COLOR. CRT: MASCARA DE TUBO CON LINEAS. CRT SUAVE: SOLO LA MASCARA. SE VE MEJOR CON LA VENTANA GRANDE O A PANTALLA COMPLETA.",
       ingame_opt_filter_value, ingame_opt_filter_activate },
+    { "MOLDURA", "FRAME",
+      "TROCA A MOLDURA (MOD BEZEL ARTWORK) ENTRE AS IMAGENS .PNG/.JPG DA PASTA DO JOGO E DA PASTA MOLDURAS (COLOQUE AS SUAS LA), E POR ULTIMO DESLIGA. APARECE NAS BORDAS (EX.: 4:3 EM MONITOR 16:9).",
+      "CYCLES THE FRAME (BEZEL ARTWORK MOD) THROUGH THE .PNG/.JPG IMAGES IN THE GAME FOLDER AND THE MOLDURAS FOLDER (PUT YOURS THERE), THEN OFF. SHOWS IN THE SIDE BARS (E.G. 4:3 ON A 16:9 MONITOR).",
+      "MARCO",
+      "CAMBIA EL MARCO (MOD BEZEL ARTWORK) ENTRE LAS IMAGENES .PNG/.JPG DE LA CARPETA DEL JUEGO Y DE LA CARPETA MOLDURAS (PON LAS TUYAS ALLI) Y AL FINAL LO DESACTIVA. SE VE EN LOS BORDES (EJ.: 4:3 EN MONITOR 16:9).",
+      ingame_opt_bezel_value, ingame_opt_bezel_activate },
     { "SCANLINES", "SCANLINES",
       "LINHAS DE VARREDURA PROPRIAS DO JOGO (A MESMA OPCAO DO LAUNCHER E DO F6). SEPARADAS DO FILTRO DE TELA: DA PARA USAR AS DUAS JUNTAS.",
       "THE GAME'S OWN SCANLINES (SAME AS THE LAUNCHER OPTION AND F6). SEPARATE FROM THE SCREEN FILTER: BOTH CAN BE USED TOGETHER.",
@@ -14478,33 +14666,7 @@ session_reboot:
         g_gl_active = (gl_renderer_init_context(sdl_window) != 0);
 
         /* Bezel artwork (Mods): load after the GL context exists. */
-        if (!g_bezel_path.empty() && g_gl_active) {
-            std::filesystem::path bp(g_bezel_path);
-            std::vector<unsigned char> file;
-            if (FILE *bf = std::fopen(bp.string().c_str(), "rb")) {
-                std::fseek(bf, 0, SEEK_END);
-                const long len = std::ftell(bf);
-                std::fseek(bf, 0, SEEK_SET);
-                if (len > 0) {
-                    file.resize((size_t)len);
-                    if (std::fread(file.data(), 1, file.size(), bf) != file.size())
-                        file.clear();
-                }
-                std::fclose(bf);
-            }
-            int bw = 0, bh = 0, bc = 0;
-            unsigned char *px = file.empty() ? nullptr
-                : stbi_load_from_memory(file.data(), (int)file.size(), &bw, &bh, &bc, 4);
-            if (px) {
-                gl_renderer_set_bezel(px, bw, bh);
-                stbi_image_free(px);
-                std::fprintf(stdout, "psxrecomp: bezel artwork %dx%d from %s\n",
-                             bw, bh, bp.string().c_str());
-            } else {
-                std::fprintf(stdout, "psxrecomp: bezel artwork not loaded: %s\n",
-                             bp.string().c_str());
-            }
-        }
+        if (g_gl_active) bezel_apply_current();
         if (!g_gl_active) {
             gr_set_backend(GR_BACKEND_SOFTWARE);
             gl_renderer_set_cpu_auth_dual(0);

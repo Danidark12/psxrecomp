@@ -3529,6 +3529,21 @@ static void handle_bioscall_dump(int id, const char *json)
     const size_t BUF_SZ = 2 * 1024 * 1024;
     char *out = (char *)malloc(BUF_SZ); if (!out) { send_err(id, "oom"); return; }
     size_t pos = 0;
+    /* "exclude":"B0:11,B0:23" drops noisy (table:index) pairs server-side so a
+     * full-ring tail is not truncated by the reply buffer. */
+    char exbuf[256] = {0};
+    uint32_t ex_tab[16]; uint32_t ex_idx[16]; int ex_n = 0;
+    if (json_get_str(json, "exclude", exbuf, sizeof exbuf)) {
+        char *p = exbuf;
+        while (*p && ex_n < 16) {
+            char *colon = strchr(p, ':');
+            if (!colon) break;
+            ex_tab[ex_n] = (uint32_t)strtoul(p, NULL, 16);
+            ex_idx[ex_n] = (uint32_t)strtoul(colon + 1, &p, 0);
+            ex_n++;
+            while (*p == ',' || *p == ' ') p++;
+        }
+    }
     if (tail > 0) {
         if (tail > (int)BIOSCALL_RING_CAP) tail = BIOSCALL_RING_CAP;
         uint64_t total = s_bioscall_seq;
@@ -3540,6 +3555,12 @@ static void handle_bioscall_dump(int id, const char *json)
             BiosCallEntry *e = &s_bioscall_ring[(start + i) & (BIOSCALL_RING_CAP - 1u)];
             if (want_index >= 0 && (long)e->index != want_index) continue;
             if (have_table && e->table_base != want_table) continue;
+            {
+                int skip = 0;
+                for (int k = 0; k < ex_n; k++)
+                    if (e->table_base == ex_tab[k] && e->index == ex_idx[k]) { skip = 1; break; }
+                if (skip) continue;
+            }
             if (pos > BUF_SZ - 512) break;
             pos += snprintf(out + pos, BUF_SZ - pos, "%s{\"seq\":%llu,\"table\":\"0x%08X\",\"index\":%u,\"func\":\"0x%08X\",\"a0\":\"0x%08X\",\"a1\":\"0x%08X\",\"a2\":\"0x%08X\",\"a3\":\"0x%08X\",\"ra\":\"0x%08X\",\"current_func\":\"0x%08X\",\"in_exc\":%u,\"frame\":%u}",
                             first ? "" : ",", (unsigned long long)e->seq, e->table_base, e->index, e->func_ptr, e->a0, e->a1, e->a2, e->a3, e->ra, e->current_func, e->in_exception, e->frame);

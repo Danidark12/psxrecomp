@@ -10,8 +10,11 @@
 
 #include <stdio.h>
 
+void psx_mod_bezel_feature_on(void);   /* main.cpp: libera a opção MOLDURA no F4 */
+
 static void builtin_bezel_activate(void) {
     char path[1024] = "";
+    psx_mod_bezel_feature_on();
     if (!psx_mod_current_resource_path("artwork", path, sizeof path)) {
         fprintf(stdout, "psxrecomp: bezel artwork enabled with no image selected\n");
         return;
