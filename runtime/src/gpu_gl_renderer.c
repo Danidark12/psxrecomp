@@ -357,6 +357,7 @@ static int interp_present(float alpha);
 static void interp_present_source_interval(void);
 static void interp_draw_quad(float alpha, int lx, int ly, int lw, int lh);
 static void present_bezel(int ww, int wh, int lx, int ly, int lw, int lh);
+static GLuint s_bezel_tex;   /* definida junto de gl_renderer_set_bezel */
 
 static int           s_raster_ok = 0;      /* full GPU pipeline available */
 
@@ -3144,6 +3145,17 @@ void gl_renderer_present(const uint32_t *pixels, int src_w, int src_h, int linea
         letterbox_rect_aspect(ww, wh, 4, 3, &lx, &ly, &lw, &lh);
     else
         letterbox_rect(ww, wh, &lx, &ly, &lw, &lh);
+    /* Moldura (mod Bezel) também neste caminho (FMV 24-bit / readout da CPU):
+     * a arte cobre as bordas e a área da imagem volta a ser preta, para que a
+     * faixa curta de vídeo abaixo continue com barras pretas como antes. */
+    if (s_bezel_tex) {
+        present_bezel(ww, wh, lx, ly, lw, lh);
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(lx, ly, lw, lh);
+        glClearColor(0.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+    }
     /* Short GP1(07h) bands (MotK FMV is 128 lines) only fill a fraction of
      * NTSC active height on hardware. Stretching them to the full letterbox
      * doubles vertical scale vs horizontal and makes the frame look too wide
