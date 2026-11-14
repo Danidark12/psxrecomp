@@ -8,6 +8,40 @@
 #include <cstdio>
 #include <limits>
 
+/* "Carregar disco na RAM" (opcao do launcher): le a imagem inteira na
+ * abertura para que as leituras do jogo nunca esperem pelo disco do PC. */
+static int s_preload_enabled = 0;
+extern "C" void iso_set_preload(int on) { s_preload_enabled = on ? 1 : 0; }
+
+static void preload_segment(PS1::BinSegment& seg, uint64_t size) {
+    if (size == 0 || size > (1536ull << 20)) return;      /* ate 1,5 GB */
+    try {
+        seg.mem.resize((size_t)size);
+    } catch (...) {
+        seg.mem.clear();
+        return;
+    }
+    seg.file.clear();
+    seg.file.seekg(0, std::ios::beg);
+    uint64_t done = 0;
+    while (done < size) {
+        const uint64_t chunk = std::min<uint64_t>(size - done, 8u << 20);
+        seg.file.read(reinterpret_cast<char*>(seg.mem.data() + done), (std::streamsize)chunk);
+        if ((uint64_t)seg.file.gcount() != chunk) {
+            std::vector<uint8_t>().swap(seg.mem);          /* falhou: volta ao arquivo */
+            break;
+        }
+        done += chunk;
+    }
+    seg.file.clear();
+}
+
+static bool mem_read(const PS1::BinSegment* seg, uint64_t offset, uint8_t* out, size_t len) {
+    if (offset + len > seg->mem.size()) return false;
+    std::memcpy(out, seg->mem.data() + offset, len);
+    return true;
+}
+
 namespace PS1 {
 
 // PS1 CD-ROM sector size (Mode 2, Form 1 user data)
@@ -332,6 +366,7 @@ bool ISOReader::Open(const std::string& filename) {
                                                                  : SECTOR_SIZE));
         seg.start_lba    = next_lba;
         next_lba += seg.sector_count;
+        if (s_preload_enabled) preload_segment(seg, size);
         segments_.push_back(std::move(seg));
     }
 
@@ -498,6 +533,13 @@ bool ISOReader::ReadSector(uint32_t lba, uint8_t* buffer) {
     }
     const uint32_t local_lba = lba - seg->start_lba;
 
+    if (!seg->mem.empty()) {
+        const uint64_t off = seg->raw
+            ? (uint64_t)local_lba * RAW_SECTOR_SIZE + RAW_DATA_OFFSET
+            : (uint64_t)local_lba * SECTOR_SIZE;
+        return mem_read(seg, off, buffer, SECTOR_SIZE);
+    }
+
     // Clear any error flags from a previous failed read
     seg->file.clear();
 
@@ -547,6 +589,9 @@ bool ISOReader::ReadRawSector(uint32_t lba, uint8_t* buffer) {
         return false;
     }
     const uint32_t local_lba = lba - seg->start_lba;
+
+    if (!seg->mem.empty())
+        return mem_read(seg, (uint64_t)local_lba * RAW_SECTOR_SIZE, buffer, RAW_SECTOR_SIZE);
 
     seg->file.clear();
     std::streampos offset = static_cast<std::streampos>(local_lba) * RAW_SECTOR_SIZE;
