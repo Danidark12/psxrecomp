@@ -31,8 +31,6 @@ void psx_cheats_menu_set_mode(int options);
 int psx_ui_lang(void);
 /* Filtro de tela (0 nenhum, 1 LCD, 2 LCD RGB, 3 CRT, 4 CRT suave). */
 int psx_screen_filter_load(void);
-/* "Carregar disco na RAM" (preload_disc.txt). */
-int psx_disc_preload_enabled(void);
 void psx_screen_filter_save(int mode);
 const char *psx_screen_filter_label(int mode, int lang);
 

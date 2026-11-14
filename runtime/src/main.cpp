@@ -6482,7 +6482,6 @@ static void ingame_opt_filter_activate(char *msg, int cap) {
     std::snprintf(msg, cap, "%s", psx_screen_filter_label(next, psx_ui_lang()));
 }
 
-extern "C" void iso_set_preload(int on);
 static int g_ingame_launcher_requested = 0;
 static void ingame_opt_launcher_value(char *out, int cap, int pt) {
     (void)pt;
@@ -14110,7 +14109,6 @@ session_reboot:
     if (g_audio_spu_hq)
         std::fprintf(stdout, "psxrecomp: SPU float-shadow enabled (verified-enhancement)\n");
     spu_init();
-    iso_set_preload(psx_disc_preload_enabled());
     cdrom_init(disc_path_str.empty() ? NULL : disc_path_str.c_str());
     /* Discos do jogo para a troca em jogo: o montado e os irmãos com o mesmo
      * nome trocando só o número ("(Disc 1)" -> "(Disc 2)"), ou o do roster. */
