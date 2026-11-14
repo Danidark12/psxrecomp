@@ -6482,6 +6482,25 @@ static void ingame_opt_filter_activate(char *msg, int cap) {
     std::snprintf(msg, cap, "%s", psx_screen_filter_label(next, psx_ui_lang()));
 }
 
+static void ingame_opt_scan_value(char *out, int cap, int lang) {
+    if (!g_gl_active) {
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "OPENGL ONLY", "SO NO OPENGL", "SOLO OPENGL"));
+        return;
+    }
+    std::snprintf(out, cap, "%s", g_video_scanlines
+        ? ingame_tr(lang, "ON", "LIGADO", "ACTIVADO")
+        : ingame_tr(lang, "OFF", "DESLIGADO", "DESACTIVADO"));
+}
+static void ingame_opt_scan_activate(char *msg, int cap) {
+    if (!g_gl_active) {
+        std::snprintf(msg, cap, "Scanlines need the OpenGL renderer");
+        return;
+    }
+    psx_video_set_scanlines(g_video_scanlines ? 0 : 1, g_video_scanline_strength);
+    ingame_options_persist();
+    std::snprintf(msg, cap, "Scanlines %s", g_video_scanlines ? "on" : "off");
+}
+
 static int g_ingame_launcher_requested = 0;
 static void ingame_opt_launcher_value(char *out, int cap, int pt) {
     (void)pt;
@@ -6517,6 +6536,12 @@ static const PsxMenuOption kIngameOptions[] = {
       "FILTRO DE PANTALLA",
       "LCD: REJILLA OSCURA ENTRE LOS PIXELES, COMO UNA PORTATIL. LCD RGB: CON SUBPIXELES DE COLOR. CRT: MASCARA DE TUBO CON LINEAS. CRT SUAVE: SOLO LA MASCARA. SE VE MEJOR CON LA VENTANA GRANDE O A PANTALLA COMPLETA.",
       ingame_opt_filter_value, ingame_opt_filter_activate },
+    { "SCANLINES", "SCANLINES",
+      "LINHAS DE VARREDURA PROPRIAS DO JOGO (A MESMA OPCAO DO LAUNCHER E DO F6). SEPARADAS DO FILTRO DE TELA: DA PARA USAR AS DUAS JUNTAS.",
+      "THE GAME'S OWN SCANLINES (SAME AS THE LAUNCHER OPTION AND F6). SEPARATE FROM THE SCREEN FILTER: BOTH CAN BE USED TOGETHER.",
+      "SCANLINES",
+      "LINEAS DE BARRIDO PROPIAS DEL JUEGO (LA MISMA OPCION DEL LAUNCHER Y DE F6). SEPARADAS DEL FILTRO DE PANTALLA: SE PUEDEN USAR LAS DOS JUNTAS.",
+      ingame_opt_scan_value, ingame_opt_scan_activate },
     { "TROCAR DISCO", "CHANGE DISC",
       "TROCA PARA O OUTRO DISCO, COMO ABRIR E FECHAR A TAMPA DO CONSOLE. O JOGO TAMBEM TROCA SOZINHO QUANDO PEDE OUTRO DISCO. O OUTRO DISCO PRECISA ESTAR NA MESMA PASTA, COM O MESMO NOME (DISC 1 / DISC 2).",
       "SWITCHES TO THE OTHER DISC, LIKE OPENING AND CLOSING THE CONSOLE LID. THE GAME ALSO SWITCHES BY ITSELF WHEN IT ASKS FOR ANOTHER DISC. THE OTHER DISC MUST BE IN THE SAME FOLDER WITH THE SAME NAME (DISC 1 / DISC 2).",
@@ -11585,6 +11610,8 @@ static void ingame_options_persist(void) {
     us.has_frame_interpolation_fps = true;
     us.fast_forward_speed = g_fast_forward_speed;
     us.has_fast_forward_speed = true;
+    us.scanlines = g_video_scanlines;
+    us.has_scanlines = true;
     PSXRecompV4::save_user_settings(g_lnch_settings_path, us);
 }
 #endif
