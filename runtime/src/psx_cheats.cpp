@@ -38,7 +38,6 @@ extern "C" void psx_cheats_menu_set_options(const PsxMenuOption*, int) {}
 extern "C" void psx_cheats_menu_set_mode(int) {}
 extern "C" int  psx_ui_lang(void) { return 0; }
 extern "C" int  psx_screen_filter_load(void) { return 0; }
-extern "C" int  psx_disc_preload_enabled(void) { return 0; }
 extern "C" void psx_screen_filter_save(int) {}
 extern "C" const char* psx_screen_filter_label(int, int) { return "NONE"; }
 #else
@@ -204,7 +203,6 @@ static int ui_lang(void) {
 }
 extern "C" int psx_ui_lang(void) { return ui_lang(); }
 extern "C" int psx_screen_filter_load(void) { return recomp_screen_filter_load(); }
-extern "C" int psx_disc_preload_enabled(void) { return recomp_disc_preload_load(); }
 extern "C" void psx_screen_filter_save(int mode) { recomp_screen_filter_save(mode); }
 extern "C" const char* psx_screen_filter_label(int mode, int lang) {
     return recomp_screen_filter_name_upper(mode, lang);
