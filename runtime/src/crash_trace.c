@@ -118,6 +118,11 @@ extern uint64_t crash_trace_unknown_seq_get(void);
 
 /* JSON helpers. Hand-rolled to avoid allocations on the SEH path. */
 
+/* Optional extra top-level JSON member(s) for the report ("\"key\": {...}",
+ * no trailing comma), supplied by the runtime. Must only read static state. */
+static void (*s_extra_json_fn)(char *out, size_t cap) = NULL;
+void crash_trace_set_extra_json(void (*fn)(char *out, size_t cap)) { s_extra_json_fn = fn; }
+
 static int append_str(char *buf, size_t cap, size_t *pos, const char *s) {
     size_t n = strlen(s);
     if (*pos + n >= cap) return 0;
@@ -729,6 +734,17 @@ void psx_crash_trace_dump(const char *reason, void *seh_info) {
         append_native_stack(buf, sizeof(buf), &pos, sp);
     }
 #endif
+
+    /* Host hitch recorder (worst frames this session), if the runtime registered one. */
+    if (s_extra_json_fn) {
+        static char extra[24 * 1024];
+        extra[0] = 0;
+        s_extra_json_fn(extra, sizeof(extra));
+        if (extra[0]) {
+            append_str(buf, sizeof(buf), &pos, extra);
+            append_str(buf, sizeof(buf), &pos, ",\n");
+        }
+    }
 
     /* dispatch_ring tail (last 256) */
     {

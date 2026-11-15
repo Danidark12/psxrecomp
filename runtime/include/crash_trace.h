@@ -36,6 +36,10 @@ void psx_fatal_halt(const char *reason);
  * external reader can tell a fatal halt from a wedge. NULL = healthy. */
 extern const char *g_psx_fatal_reason;
 
+#include <stddef.h>
+/* Register a callback that appends extra top-level JSON to the run report. */
+void crash_trace_set_extra_json(void (*fn)(char *out, size_t cap));
+
 #ifdef __cplusplus
 }
 #endif
