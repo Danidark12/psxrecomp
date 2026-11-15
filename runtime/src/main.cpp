@@ -71,6 +71,7 @@ extern "C" void psx_event_step_conservative_env_init(void);
 #include "memcard.h"
 #include "debug_server.h"
 #include "crash_trace.h"
+#include <cstdarg>
 #include "freeze_heartbeat.h"
 #include "config_loader.h"
 #include "bios_rom_alias.h"
@@ -3557,7 +3558,122 @@ static void runtime_perf_bench_tick(uint64_t now) {
     g_runtime_perf.bench_reported = true;
 }
 
+/* ---- Hitch recorder ------------------------------------------------------
+ * Always on, a few counter reads per frame. Keeps the worst frames of the
+ * session by WORK time (guest emulation + host present, excluding the pacer's
+ * intentional wait) with a per-phase split, and writes them into
+ * psx_last_run_report.json ("hitches") when the game closes. Used to find
+ * stutters that only happen on a player's machine. */
+struct HitchRec {
+    uint64_t frame; double t_s;
+    float work_ms, guest_ms, host_ms, pacer_ms, capture_ms, poll_ms, overlay_load_ms;
+    uint32_t dirty_insns, overlay_loads, overlay_inval, gl_up[6];
+};
+#define HITCH_TOP 40
+static struct {
+    uint64_t freq, t0, enter, last_exit;
+    uint64_t pacer0, cap0, poll0, ovl_us0, dirty0, up0[6];
+    uint32_t loads0, inval0;
+    HitchRec top[HITCH_TOP]; int n;
+    uint64_t frames, over25, over50, over100, over250;
+    double work_sum_ms;
+} g_hitch;
+
+static void hitch_frame_begin() {
+    if (!g_hitch.freq) {
+        g_hitch.freq = SDL_GetPerformanceFrequency();
+        if (!g_hitch.freq) g_hitch.freq = 1;
+        g_hitch.t0 = SDL_GetPerformanceCounter();
+    }
+    g_hitch.enter = SDL_GetPerformanceCounter();
+}
+
+static void hitch_frame_end() {
+    const uint64_t now = SDL_GetPerformanceCounter();
+    const double k = 1000.0 / (double)g_hitch.freq;
+    uint64_t ovl_us = 0; uint64_t up[6] = {0};
+    uint32_t loads = 0, inval = 0;
+    overlay_loader_get_load_timing(&ovl_us, nullptr, nullptr);
+    overlay_loader_get_counters(&loads, &inval, nullptr, nullptr, nullptr, nullptr,
+                                nullptr, nullptr, nullptr, nullptr, nullptr);
+    gl_renderer_runtime_diag(up);
+    HitchRec r{};
+    r.frame = s_frame_count;
+    r.t_s = (double)(now - g_hitch.t0) / (double)g_hitch.freq;
+    r.pacer_ms   = (float)((g_runtime_perf.pacer_ticks - g_hitch.pacer0) * k);
+    r.capture_ms = (float)((g_runtime_perf.autocapture_ticks - g_hitch.cap0) * k);
+    r.poll_ms    = (float)((g_runtime_perf.provider_poll_ticks - g_hitch.poll0) * k);
+    r.guest_ms   = g_hitch.last_exit ? (float)((g_hitch.enter - g_hitch.last_exit) * k) : 0.f;
+    r.host_ms    = (float)((now - g_hitch.enter) * k) - r.pacer_ms;
+    if (r.host_ms < 0.f) r.host_ms = 0.f;
+    r.work_ms    = r.guest_ms + r.host_ms;
+    r.overlay_load_ms = (float)((ovl_us - g_hitch.ovl_us0) / 1000.0);
+    r.dirty_insns   = (uint32_t)(g_dirty_ram_insns_run - g_hitch.dirty0);
+    r.overlay_loads = loads - g_hitch.loads0;
+    r.overlay_inval = inval - g_hitch.inval0;
+    for (int i = 0; i < 6; i++) r.gl_up[i] = (uint32_t)(up[i] - g_hitch.up0[i]);
+
+    g_hitch.pacer0 = g_runtime_perf.pacer_ticks;
+    g_hitch.cap0 = g_runtime_perf.autocapture_ticks;
+    g_hitch.poll0 = g_runtime_perf.provider_poll_ticks;
+    g_hitch.ovl_us0 = ovl_us; g_hitch.dirty0 = g_dirty_ram_insns_run;
+    g_hitch.loads0 = loads; g_hitch.inval0 = inval;
+    for (int i = 0; i < 6; i++) g_hitch.up0[i] = up[i];
+    const bool first = (g_hitch.last_exit == 0);
+    g_hitch.last_exit = now;
+    if (first) return;
+
+    g_hitch.frames++;
+    g_hitch.work_sum_ms += r.work_ms;
+    if (r.work_ms > 25.f)  g_hitch.over25++;
+    if (r.work_ms > 50.f)  g_hitch.over50++;
+    if (r.work_ms > 100.f) g_hitch.over100++;
+    if (r.work_ms > 250.f) g_hitch.over250++;
+    if (r.work_ms < 25.f) return;
+    if (g_hitch.n < HITCH_TOP) { g_hitch.top[g_hitch.n++] = r; return; }
+    int lo = 0;
+    for (int i = 1; i < HITCH_TOP; i++)
+        if (g_hitch.top[i].work_ms < g_hitch.top[lo].work_ms) lo = i;
+    if (r.work_ms > g_hitch.top[lo].work_ms) g_hitch.top[lo] = r;
+}
+
+static void hitch_report_json(char *out, size_t cap) {
+    size_t pos = 0;
+    auto add = [&](const char *fmt, ...) {
+        if (pos >= cap) return;
+        va_list ap; va_start(ap, fmt);
+        int n = std::vsnprintf(out + pos, cap - pos, fmt, ap);
+        va_end(ap);
+        if (n > 0) pos += (size_t)n;
+        if (pos >= cap) pos = cap - 1;
+    };
+    add("  \"hitches\": {\n    \"frames\": %llu, \"work_ms_avg\": %.2f,\n"
+        "    \"over_25ms\": %llu, \"over_50ms\": %llu, \"over_100ms\": %llu, \"over_250ms\": %llu,\n"
+        "    \"worst\": [",
+        (unsigned long long)g_hitch.frames,
+        g_hitch.frames ? g_hitch.work_sum_ms / (double)g_hitch.frames : 0.0,
+        (unsigned long long)g_hitch.over25, (unsigned long long)g_hitch.over50,
+        (unsigned long long)g_hitch.over100, (unsigned long long)g_hitch.over250);
+    for (int i = 0; i < g_hitch.n; i++) {
+        const HitchRec &r = g_hitch.top[i];
+        add("%s\n      {\"frame\": %llu, \"t_s\": %.2f, \"work_ms\": %.1f, \"guest_ms\": %.1f, "
+            "\"host_ms\": %.1f, \"pacer_ms\": %.1f, \"capture_ms\": %.1f, \"poll_ms\": %.1f, "
+            "\"overlay_load_ms\": %.1f, \"dirty_insns\": %u, \"overlay_loads\": %u, "
+            "\"overlay_inval\": %u, \"gl_up\": [%u,%u,%u,%u,%u,%u]}",
+            i ? "," : "", (unsigned long long)r.frame, r.t_s, r.work_ms, r.guest_ms,
+            r.host_ms, r.pacer_ms, r.capture_ms, r.poll_ms, r.overlay_load_ms,
+            r.dirty_insns, r.overlay_loads, r.overlay_inval,
+            r.gl_up[0], r.gl_up[1], r.gl_up[2], r.gl_up[3], r.gl_up[4], r.gl_up[5]);
+    }
+    add("\n    ]\n  }");
+}
+
 static void runtime_perf_frame_begin() {
+    {
+        static bool registered = false;
+        if (!registered) { registered = true; crash_trace_set_extra_json(hitch_report_json); }
+    }
+    hitch_frame_begin();
     runtime_perf_init();
     if (!g_runtime_perf.enabled) return;
     uint64_t now = SDL_GetPerformanceCounter();
@@ -3570,6 +3686,7 @@ static void runtime_perf_frame_begin() {
 }
 
 static void runtime_perf_frame_end() {
+    hitch_frame_end();
     if (!g_runtime_perf.enabled) return;
     g_runtime_perf.last_frame_exit_counter = SDL_GetPerformanceCounter();
 }
@@ -3580,7 +3697,7 @@ public:
 };
 
 static uint64_t runtime_perf_section_begin() {
-    return g_runtime_perf.enabled ? SDL_GetPerformanceCounter() : 0;
+    return SDL_GetPerformanceCounter();   /* always: the hitch recorder reads the totals */
 }
 
 static void runtime_perf_section_end(uint64_t start, uint64_t *total) {
