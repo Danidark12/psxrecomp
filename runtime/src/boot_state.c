@@ -882,7 +882,11 @@ int boot_state_load_buffer(const uint8_t* file, size_t file_len,
         }
 
         t_sec = boot_state_mono_ms();
-        if (!apply_section(tag, apply_ptr, apply_len, cpu, entry_pc)) ok = 0;
+        if (!apply_section(tag, apply_ptr, apply_len, cpu, entry_pc)) {
+            ok = 0;
+            fprintf(stderr, "boot_state: reject — section %u (%u bytes) did not apply\n",
+                    (unsigned)tag, (unsigned)apply_len);
+        }
         else if (tag < 32) seen |= (1u << tag);
         {
             double dt = boot_state_mono_ms() - t_sec;

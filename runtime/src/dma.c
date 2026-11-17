@@ -1415,7 +1415,7 @@ static int dma_r_gpu_ll(PstR *r, DMAGPULinkedList *s) {
            pst_r_u32(r, &s->nodes_processed) && pst_r_u32(r, &s->max_nodes) &&
            pst_r_u32(r, &s->total_words) && pst_r_u32(r, &s->empty_rank);
     return ok && s->payload_index <= s->word_count &&
-           s->phase <= DMA_GPU_LL_PHASE_PAYLOAD;
+           s->phase <= DMA_GPU_LL_PHASE_BUSY;
 }
 static int dma_w_delay(PstW *w, const DMADelayedComplete *d) {
     return pst_w_u8(w, d->active) && pst_w_u32(w, d->total_words) &&
