@@ -26,6 +26,7 @@
 #include "psx_cheats.h"
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_bezel_preview.h"
+#include "recomp_filter_preview.h"
 #endif
 #include "host_osd.h"
 #include "host_keymap.h"
@@ -6631,6 +6632,23 @@ static void ingame_opt_filter_activate(char *msg, int cap) {
     psx_screen_filter_save(next);
     std::snprintf(msg, cap, "%s", psx_screen_filter_label(next, psx_ui_lang()));
 }
+static void ingame_opt_upscale_value(char *out, int cap, int lang) {
+    if (!g_gl_active) {
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "OPENGL ONLY", "SO NO OPENGL", "SOLO OPENGL"));
+        return;
+    }
+    std::snprintf(out, cap, "%s", psx_upscale_filter_label(gl_renderer_get_upscale_filter(), lang));
+}
+static void ingame_opt_upscale_activate(char *msg, int cap) {
+    if (!g_gl_active) {
+        std::snprintf(msg, cap, "Upscalers need the OpenGL renderer");
+        return;
+    }
+    const int next = (gl_renderer_get_upscale_filter() + 1) % gl_renderer_upscale_filter_count();
+    gl_renderer_set_upscale_filter(next);
+    psx_upscale_filter_save(next);
+    std::snprintf(msg, cap, "%s", psx_upscale_filter_label(next, psx_ui_lang()));
+}
 
 /* ---- Molduras (mod Bezel) no menu F4 ------------------------------------ */
 static std::filesystem::path bezel_choice_file(void) {
@@ -6671,14 +6689,9 @@ static void bezel_choice_save(void) {
                  g_bezel_off ? "off" : g_bezel_path.c_str());
     std::fclose(f);
 }
-/* Miniatura da moldura atual para o menu F4: a moldura com uma cena de
- * exemplo do jogo no meio (assets/frame_preview_sample.png, opcional). */
-static std::vector<unsigned char> g_bezel_preview;
-static int g_bezel_preview_w = 0, g_bezel_preview_h = 0;
-static void bezel_preview_build(const unsigned char *rgba, int w, int h) {
-    g_bezel_preview.clear();
-    g_bezel_preview_w = g_bezel_preview_h = 0;
-    if (!rgba) return;
+/* Cena de exemplo do jogo (assets/frame_preview_sample.png: Lenneth num
+ * ponto de save, 320x224) usada nas prévias de molduras e filtros. */
+static void frame_sample(const unsigned char **px, int *w, int *h) {
     static std::vector<unsigned char> sample;
     static int sw = 0, sh = 0, tried = 0;
     if (!tried) {
@@ -6696,18 +6709,33 @@ static void bezel_preview_build(const unsigned char *rgba, int w, int h) {
             }
             std::fclose(f);
             int c = 0;
-            unsigned char *px = file.empty() ? nullptr
+            unsigned char *img = file.empty() ? nullptr
                 : stbi_load_from_memory(file.data(), (int)file.size(), &sw, &sh, &c, 4);
-            if (px) {
-                sample.assign(px, px + (size_t)sw * (size_t)sh * 4u);
-                stbi_image_free(px);
+            if (img) {
+                sample.assign(img, img + (size_t)sw * (size_t)sh * 4u);
+                stbi_image_free(img);
             }
         }
     }
+    *px = sample.empty() ? nullptr : sample.data();
+    *w = sw;
+    *h = sh;
+}
+/* Miniatura da moldura atual para o menu F4: a moldura com uma cena de
+ * exemplo do jogo no meio (assets/frame_preview_sample.png, opcional). */
+static std::vector<unsigned char> g_bezel_preview;
+static int g_bezel_preview_w = 0, g_bezel_preview_h = 0;
+static void bezel_preview_build(const unsigned char *rgba, int w, int h) {
+    g_bezel_preview.clear();
+    g_bezel_preview_w = g_bezel_preview_h = 0;
+    if (!rgba) return;
+    const unsigned char *sample = nullptr;
+    int sw = 0, sh = 0;
+    frame_sample(&sample, &sw, &sh);
 #if defined(RECOMP_LAUNCHER)
     int ow = 0, oh = 0;
     unsigned char *out = recomp_bezel_preview_compose(
-        rgba, w, h, sample.empty() ? nullptr : sample.data(), sw, sh, 320, 160, &ow, &oh);
+        rgba, w, h, sample, sw, sh, 320, 160, &ow, &oh);
     if (!out) return;
     g_bezel_preview.assign(out, out + (size_t)ow * (size_t)oh * 4u);
     g_bezel_preview_w = ow;
@@ -6883,6 +6911,47 @@ static void ingame_opt_launcher_activate(char *msg, int cap) {
     g_ingame_launcher_requested = 1;
 }
 
+/* Prévia dos filtros no menu F4 (linhas Upscaler, Filtro de tela e
+ * Scanlines): a combinação atual num recorte da cena de exemplo, em 3x. */
+static std::vector<unsigned char> g_filter_preview;
+static int g_filter_preview_key = -1, g_filter_preview_w = 0, g_filter_preview_h = 0;
+static int ingame_opt_filter_preview(const unsigned char **rgba, int *w, int *h) {
+#if defined(RECOMP_LAUNCHER)
+    if (!g_gl_active) return 0;
+    const unsigned char *sample = nullptr;
+    int sw = 0, sh = 0;
+    frame_sample(&sample, &sw, &sh);
+    if (!sample) return 0;
+    const int up = gl_renderer_get_upscale_filter();
+    const int flt = gl_renderer_get_screen_filter();
+    const int scan = g_video_scanlines ? 1 : 0;
+    const int key = up * 100000 + flt * 10000 + scan * 1000 +
+                    (int)(g_video_scanline_strength * 100.0f);
+    if (key != g_filter_preview_key) {
+        g_filter_preview_key = key;
+        g_filter_preview.clear();
+        int ow = 0, oh = 0;
+        unsigned char *img = recomp_filter_preview_render(
+            sample, sw, sh, 136, 122, 44, 38, 3, up, flt, scan,
+            g_video_scanline_strength, &ow, &oh);
+        if (img) {
+            g_filter_preview.assign(img, img + (size_t)ow * (size_t)oh * 4u);
+            g_filter_preview_w = ow;
+            g_filter_preview_h = oh;
+            recomp_filter_preview_free(img);
+        }
+    }
+    if (g_filter_preview.empty()) return 0;
+    *rgba = g_filter_preview.data();
+    *w = g_filter_preview_w;
+    *h = g_filter_preview_h;
+    return 1;
+#else
+    (void)rgba; (void)w; (void)h;
+    return 0;
+#endif
+}
+
 static const PsxMenuOption kIngameOptions[] = {
     { "PROPORCAO DA TELA", "ASPECT RATIO",
       "4:3 E A IMAGEM ORIGINAL, SEM ESTICAR, COM BARRAS PRETAS NOS LADOS EM QUALQUER MONITOR. 16:9 E 21:9 (ULTRAWIDE) ALARGAM A IMAGEM PARA ENCHER A TELA: O JOGO E 2D E SO DESENHA EM 4:3.",
@@ -6902,12 +6971,18 @@ static const PsxMenuOption kIngameOptions[] = {
       "SUAVIZAR LA IMAGEN",
       "ACTIVADO: LA IMAGEN FINAL SE AMPLIA CON FILTRO LINEAL. DESACTIVADO: SE AMPLIA SIN FILTRO (PIXELES CUADRADOS).",
       ingame_opt_smooth_value, ingame_opt_smooth_activate },
+    { "UPSCALER", "UPSCALER",
+      "SUAVIZA A PIXEL ART ANTES DO FILTRO DE TELA. SHARP BILINEAR: PIXELS LIMPOS E DO MESMO TAMANHO. SCALE2X/SCALE3X: ARREDONDAM AS DIAGONAIS MANTENDO O VISUAL DE PIXEL. XBR: BORDAS SUAVES, TIPO DESENHO. COMBINA COM O FILTRO DE TELA E AS SCANLINES.",
+      "SMOOTHS THE PIXEL ART BEFORE THE SCREEN FILTER. SHARP BILINEAR: CLEAN PIXELS, ALL THE SAME SIZE. SCALE2X/SCALE3X: ROUND OFF DIAGONALS AND KEEP THE PIXEL LOOK. XBR: SMOOTH, HAND-DRAWN EDGES. COMBINES WITH THE SCREEN FILTER AND SCANLINES.",
+      "UPSCALER",
+      "SUAVIZA EL PIXEL ART ANTES DEL FILTRO DE PANTALLA. SHARP BILINEAR: PIXELES LIMPIOS Y DEL MISMO TAMANO. SCALE2X/SCALE3X: REDONDEAN LAS DIAGONALES SIN PERDER EL ASPECTO DE PIXEL. XBR: BORDES SUAVES, TIPO DIBUJO. SE COMBINA CON EL FILTRO DE PANTALLA Y LAS SCANLINES.",
+      ingame_opt_upscale_value, ingame_opt_upscale_activate, ingame_opt_filter_preview },
     { "FILTRO DE TELA", "SCREEN FILTER",
-      "LCD, LCD RGB E CRT IMITAM TELAS ANTIGAS. PIXELS NITIDOS: PIXELS LIMPOS E DO MESMO TAMANHO. SCALE2X/SCALE3X: ARREDONDAM AS DIAGONAIS SEM PERDER O VISUAL DE PIXEL. XBR: BORDAS SUAVES, TIPO DESENHO. PONTOS: MATRIZ DE PONTOS. COMBINA COM AS SCANLINES.",
-      "LCD, LCD RGB AND CRT IMITATE OLD SCREENS. SHARP PIXELS: CLEAN PIXELS, ALL THE SAME SIZE. SCALE2X/SCALE3X: ROUND OFF DIAGONALS AND KEEP THE PIXEL LOOK. XBR: SMOOTH, HAND-DRAWN EDGES. DOTS: DOT MATRIX. WORKS TOGETHER WITH SCANLINES.",
+      "MASCARA POR CIMA DO UPSCALER. LCD GRID: GRADE ENTRE OS PIXELS. LCD RGB: COM SUBPIXELS COLORIDOS. CRT: MASCARA DE TUBO COM LINHAS. SOFT CRT: SO A MASCARA. DOT MATRIX: PONTOS REDONDOS. MELHOR COM A JANELA GRANDE OU EM TELA CHEIA.",
+      "MASK DRAWN OVER THE UPSCALER. LCD GRID: GRID BETWEEN PIXELS. LCD RGB: WITH COLOURED SUBPIXELS. CRT: TUBE MASK WITH SCANLINES. SOFT CRT: MASK ONLY. DOT MATRIX: ROUND DOTS. BEST WITH A LARGE WINDOW OR FULL SCREEN.",
       "FILTRO DE PANTALLA",
-      "LCD, LCD RGB Y CRT IMITAN PANTALLAS ANTIGUAS. PIXELES NITIDOS: PIXELES LIMPIOS Y DEL MISMO TAMANO. SCALE2X/SCALE3X: REDONDEAN LAS DIAGONALES SIN PERDER EL ASPECTO DE PIXEL. XBR: BORDES SUAVES, TIPO DIBUJO. PUNTOS: MATRIZ DE PUNTOS. SE COMBINA CON LAS SCANLINES.",
-      ingame_opt_filter_value, ingame_opt_filter_activate },
+      "MASCARA ENCIMA DEL UPSCALER. LCD GRID: REJILLA ENTRE LOS PIXELES. LCD RGB: CON SUBPIXELES DE COLOR. CRT: MASCARA DE TUBO CON LINEAS. SOFT CRT: SOLO LA MASCARA. DOT MATRIX: PUNTOS REDONDOS. MEJOR CON LA VENTANA GRANDE O A PANTALLA COMPLETA.",
+      ingame_opt_filter_value, ingame_opt_filter_activate, ingame_opt_filter_preview },
     { "MOLDURA", "FRAME",
       "TROCA A MOLDURA (MOD BEZEL ARTWORK) ENTRE AS IMAGENS .PNG/.JPG DA PASTA DO JOGO E DA PASTA MOLDURAS (COLOQUE AS SUAS LA), E POR ULTIMO DESLIGA. APARECE NAS BORDAS (EX.: 4:3 EM MONITOR 16:9).",
       "CYCLES THE FRAME (BEZEL ARTWORK MOD) THROUGH THE .PNG/.JPG IMAGES IN THE GAME FOLDER AND THE MOLDURAS FOLDER (PUT YOURS THERE), THEN OFF. SHOWS IN THE SIDE BARS (E.G. 4:3 ON A 16:9 MONITOR).",
@@ -6919,7 +6994,7 @@ static const PsxMenuOption kIngameOptions[] = {
       "THE GAME'S OWN SCANLINES (SAME AS THE LAUNCHER OPTION AND F6). SEPARATE FROM THE SCREEN FILTER: BOTH CAN BE USED TOGETHER.",
       "SCANLINES",
       "LINEAS DE BARRIDO PROPIAS DEL JUEGO (LA MISMA OPCION DEL LAUNCHER Y DE F6). SEPARADAS DEL FILTRO DE PANTALLA: SE PUEDEN USAR LAS DOS JUNTAS.",
-      ingame_opt_scan_value, ingame_opt_scan_activate },
+      ingame_opt_scan_value, ingame_opt_scan_activate, ingame_opt_filter_preview },
     { "TROCAR DISCO", "CHANGE DISC",
       "TROCA PARA O OUTRO DISCO, COMO ABRIR E FECHAR A TAMPA DO CONSOLE. O JOGO TAMBEM TROCA SOZINHO QUANDO PEDE OUTRO DISCO. O OUTRO DISCO PRECISA ESTAR NA MESMA PASTA, COM O MESMO NOME (DISC 1 / DISC 2).",
       "SWITCHES TO THE OTHER DISC, LIKE OPENING AND CLOSING THE CONSOLE LID. THE GAME ALSO SWITCHES BY ITSELF WHEN IT ASKS FOR ANOTHER DISC. THE OTHER DISC MUST BE IN THE SAME FOLDER WITH THE SAME NAME (DISC 1 / DISC 2).",
@@ -14065,6 +14140,7 @@ int main(int argc, char** argv) {
                 if (seed.has_scanline_strength)
                     g_video_scanline_strength = (float)seed.scanline_strength;
                 gl_renderer_set_screen_filter(psx_screen_filter_load());
+    gl_renderer_set_upscale_filter(psx_upscale_filter_load());
     gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                                           g_video_scanline_strength);
                 g_auto_skip_fmv = skip_fmv_offered && seed.auto_skip_fmv ? 1 : 0;
@@ -14452,6 +14528,7 @@ session_reboot:
         if (s >= 0.f && s <= 1.f) g_video_scanline_strength = s;
     }
     gl_renderer_set_screen_filter(psx_screen_filter_load());
+    gl_renderer_set_upscale_filter(psx_upscale_filter_load());
     gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                               g_video_scanline_strength);
     if (g_video_geometry_correction || g_video_perspective_texturing) {
@@ -15958,6 +16035,7 @@ soft_return_lobby:
             if (ls.scanline_strength_pct >= 0)
                 g_video_scanline_strength = ls.scanline_strength_pct / 100.0f;
             gl_renderer_set_screen_filter(psx_screen_filter_load());
+    gl_renderer_set_upscale_filter(psx_upscale_filter_load());
     gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                                       g_video_scanline_strength);
 #endif

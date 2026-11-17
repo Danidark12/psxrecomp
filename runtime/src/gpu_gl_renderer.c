@@ -328,10 +328,16 @@ static float         s_scanline_strength = 0.5f;
 static GLint         s_present_uScanline = -1, s_present_uScanStrength = -1;
 static GLint         s_present_uScanLines = -1, s_present_uScanScale = -1;
 /* Filtro de tela (LCD/CRT), independente das scanlines. 0 = nenhum. */
-/* 0 nenhum, 1 LCD, 2 LCD RGB, 3 CRT, 4 CRT suave, 5 pixels nítidos,
- * 6 Scale2x, 7 Scale3x, 8 xBR, 9 pontos (ver PSX_UPSCALE_FUNC). */
-#define GL_SCREEN_FILTER_COUNT 10
+/* Duas etapas que se combinam (e com as scanlines):
+ *   filtro de tela / máscara (u_filter): 0 nenhum, 1 LCD Grid, 2 LCD RGB,
+ *     3 CRT, 4 Soft CRT, 5 Dot Matrix (ver PSX_SCANLINE_FUNC);
+ *   upscaler (u_upscale): 0 nenhum, 1 Sharp Bilinear, 2 Scale2x,
+ *     3 Scale3x, 4 xBR (ver PSX_UPSCALE_FUNC). */
+#define GL_SCREEN_FILTER_COUNT 6
+#define GL_UPSCALE_FILTER_COUNT 5
 static int           s_screen_filter = 0;
+static int           s_upscale_filter = 0;
+static GLint         s_present_uUpscale = -1, s_interp_uUpscale = -1;
 static GLint         s_present_uFilter = -1, s_present_uFilterCols = -1;
 static GLint         s_present_uFilterXScale = -1;
 static GLint         s_interp_uFilter = -1, s_interp_uFilterCols = -1;
@@ -920,6 +926,7 @@ static const char *PRESENT_VS =
     "uniform float u_scanline_lines;\n" \
     "uniform float u_scanline_scale;\n" \
     "uniform int   u_filter;\n" \
+    "uniform int   u_upscale;\n" \
     "uniform float u_filter_cols;\n" \
     "uniform float u_filter_xscale;\n"
 #define PSX_SCANLINE_FUNC \
@@ -940,7 +947,7 @@ static const char *PRESENT_VS =
      *   3 CRT: máscara de abertura RGB + linhas de varredura suaves.        \
      *   4 CRT suave: só máscara leve + brilho, sem linhas marcadas. */     \
     "vec3 psx_filter(vec3 rgb, vec2 uv){\n" \
-    "  if (u_filter == 0 || u_filter >= 5) return rgb;\n" \
+    "  if (u_filter == 0) return rgb;\n" \
     "  float sx = max(u_filter_xscale, 0.0), sy = max(u_scanline_scale, 0.0);\n" \
     "  float gate = clamp(min(sx, sy) - 2.0, 0.0, 1.0);\n" \
     "  if (gate <= 0.0) return rgb;\n" \
@@ -957,6 +964,11 @@ static const char *PRESENT_VS =
     "                    1.0 - clamp(abs(t - 2.5), 0.0, 1.0));\n" \
     "      o *= mix(vec3(1.0), 0.45 + 0.9 * m, 0.6);\n" \
     "    }\n" \
+    "  } else if (u_filter == 5) {\n" \
+    "    float r = length(p - 0.5) * 2.0;\n" \
+    "    float aa = 2.0 / max(min(sx, sy), 1.0);\n" \
+    "    float m = 1.0 - smoothstep(0.86 - aa, 0.86 + aa, r);\n" \
+    "    o = rgb * mix(0.38, 1.12, m);\n" \
     "  } else {\n" \
     "    float k = mod(floor(gl_FragCoord.x), 3.0);\n" \
     "    vec3 mask = k < 1.0 ? vec3(1.0, 0.7, 0.7) : k < 2.0 ? vec3(0.7, 1.0, 0.7) : vec3(0.7, 0.7, 1.0);\n" \
@@ -969,18 +981,18 @@ static const char *PRESENT_VS =
     "  }\n" \
     "  return mix(rgb, clamp(o, 0.0, 1.0), gate);\n" \
     "}\n"
-/* Filtros de escala para pixel art (u_filter >= 5). Trabalham na grade de
+/* Upscalers para pixel art (u_upscale > 0). Trabalham na grade de
  * pixels do PS1 (u_filter_cols x u_scanline_lines pixels na textura inteira)
  * e lêem os vizinhos no centro de cada pixel, então valem igual para a
  * textura da CPU, para a VRAM em resolução interna maior e para a
  * interpolação de quadros. Rodam no espaço da imagem original: a
  * proporção 16:9/21:9 só estica o resultado depois.
- *   5 PIXELS NITIDOS: pixels quadrados e do mesmo tamanho em qualquer
+ *   1 Sharp Bilinear: pixels quadrados e do mesmo tamanho em qualquer
  *     escala (bilinear só na borda de 1 pixel de saída).
- *   6 SCALE2X / 7 SCALE3X: regras EPX/AdvMAME; arredondam as diagonais
+ *   2 Scale2x / 3 Scale3x: regras EPX/AdvMAME; arredondam as diagonais
  *     mantendo cores e blocos de pixel.
- *   8 XBR: regras do xBR nível 2 (Hyllian), bordas suaves com antialias.
- *   9 PONTOS: cada pixel vira um ponto redondo (matriz de pontos). */
+ *   4 xBR: regras do xBR nível 2 (Hyllian), bordas suaves com antialias.
+ * O filtro de tela (máscara) e as scanlines são aplicados depois, por cima. */
 #define PSX_UPSCALE_FUNC \
     "vec3 psx_tap(sampler2D t, vec2 cell, vec2 grid, vec2 lo, vec2 hi){\n" \
     "  return texture(t, clamp((cell + 0.5) / grid, lo, hi)).rgb;\n" \
@@ -993,7 +1005,7 @@ static const char *PRESENT_VS =
     "  vec2 g = uv * grid;\n" \
     "  vec2 cell = floor(g);\n" \
     "  vec2 fp = g - cell;\n" \
-    "  if (u_filter == 5) {\n" \
+    "  if (u_upscale == 1) {\n" \
     "    vec2 band = 0.5 - 0.5 / sc;\n" \
     "    vec2 cd = fp - 0.5;\n" \
     "    vec2 pos = cell + (cd - clamp(cd, -band, band)) * sc + 0.5 - 0.5;\n" \
@@ -1003,15 +1015,6 @@ static const char *PRESENT_VS =
     "    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);\n" \
     "  }\n" \
     "  vec3 E = psx_tap(t, cell, grid, lo, hi);\n" \
-    "  if (u_filter == 9) {\n" \
-    "    float px = min(sc.x, sc.y);\n" \
-    "    float gate = clamp(px - 2.0, 0.0, 1.0);\n" \
-    "    float r = length(fp - 0.5) * 2.0;\n" \
-    "    float aa = 2.0 / max(px, 1.0);\n" \
-    "    float m = 1.0 - smoothstep(0.86 - aa, 0.86 + aa, r);\n" \
-    "    vec3 o = E * mix(0.38, 1.12, m);\n" \
-    "    return mix(E, clamp(o, 0.0, 1.0), gate);\n" \
-    "  }\n" \
     "  vec3 A = psx_tap(t, cell + vec2(-1.0, -1.0), grid, lo, hi);\n" \
     "  vec3 B = psx_tap(t, cell + vec2( 0.0, -1.0), grid, lo, hi);\n" \
     "  vec3 C = psx_tap(t, cell + vec2( 1.0, -1.0), grid, lo, hi);\n" \
@@ -1020,12 +1023,12 @@ static const char *PRESENT_VS =
     "  vec3 G = psx_tap(t, cell + vec2(-1.0,  1.0), grid, lo, hi);\n" \
     "  vec3 H = psx_tap(t, cell + vec2( 0.0,  1.0), grid, lo, hi);\n" \
     "  vec3 I = psx_tap(t, cell + vec2( 1.0,  1.0), grid, lo, hi);\n" \
-    "  if (u_filter == 6) {\n" \
+    "  if (u_upscale == 2) {\n" \
     "    vec3 th = fp.x < 0.5 ? D : F, oh = fp.x < 0.5 ? F : D;\n" \
     "    vec3 tv = fp.y < 0.5 ? B : H, ov = fp.y < 0.5 ? H : B;\n" \
     "    return (psx_same(th, tv) && !psx_same(tv, oh) && !psx_same(th, ov)) ? th : E;\n" \
     "  }\n" \
-    "  if (u_filter == 7) {\n" \
+    "  if (u_upscale == 3) {\n" \
     "    bool db = psx_same(D, B), bf = psx_same(B, F), dh = psx_same(D, H), hf = psx_same(H, F);\n" \
     "    bool nbf = !bf, ndh = !dh, ndb = !db, nhf = !hf;\n" \
     "    int sx = int(min(floor(fp.x * 3.0), 2.0)), sy = int(min(floor(fp.y * 3.0), 2.0));\n" \
@@ -1117,7 +1120,7 @@ static const char *PRESENT_FS =
     "void main(){\n"
     "  vec2 uv = v_uv;\n"
     "  vec4 c;\n"
-    "  if (u_filter >= 5) {\n"
+    "  if (u_upscale > 0) {\n"
     "    vec2 lo = min(u_uv_rect.xy, u_uv_rect.zw);\n"
     "    vec2 hi = max(u_uv_rect.xy, u_uv_rect.zw);\n"
     "    c = vec4(psx_upscale(u_tex, uv, lo, hi), texture(u_tex, uv).a);\n"
@@ -1150,7 +1153,7 @@ static const char *INTERP_FS =
     PSX_UPSCALE_FUNC
     "void main(){\n"
     "  vec4 prev=texture(u_prev,v_uv), curr=texture(u_curr,v_uv);\n"
-    "  if(u_filter>=5){\n"
+    "  if(u_upscale>0){\n"
     "    prev.rgb=psx_upscale(u_prev,v_uv,vec2(0.0),vec2(1.0));\n"
     "    curr.rgb=psx_upscale(u_curr,v_uv,vec2(0.0),vec2(1.0));\n"
     "  }\n"
@@ -2842,7 +2845,8 @@ static void present_set_scanline(GLint uOn, GLint uStr, GLint uLines,
     if (uOn < 0) return;
     int on = (s_scanline_on && pitch_lines > 0 && disp_lines > 0 && out_h > 0)
                  ? 1 : 0;
-    int fon = (s_screen_filter && pitch_lines > 0 && disp_lines > 0 && out_h > 0)
+    int fon = ((s_screen_filter || s_upscale_filter) && pitch_lines > 0 &&
+               disp_lines > 0 && out_h > 0)
                  ? 1 : 0;
     p_glUniform1i(uOn, on);
     if (!on && !fon) return;
@@ -2854,13 +2858,16 @@ static void present_set_scanline(GLint uOn, GLint uStr, GLint uLines,
 /* Filtro de tela: mesma regra das scanlines (pitch <= 0 desliga: OSD, bezel,
  * quadro já composto). pitch_cols/disp_cols fazem o papel das linhas na
  * horizontal. Deve ser chamado DEPOIS de present_set_scanline. */
-static void present_set_filter(GLint uF, GLint uCols, GLint uXs, int pitch_cols,
-                               int disp_cols, int out_w, int pitch_lines) {
-    if (uF < 0) return;
-    int on = (s_screen_filter && pitch_cols > 0 && disp_cols > 0 && out_w > 0 &&
-              pitch_lines > 0) ? s_screen_filter : 0;
-    p_glUniform1i(uF, on);
-    if (!on) return;
+static void present_set_filter(GLint uF, GLint uUp, GLint uCols, GLint uXs,
+                               int pitch_cols, int disp_cols, int out_w,
+                               int pitch_lines) {
+    if (uF < 0 && uUp < 0) return;
+    const int ok = pitch_cols > 0 && disp_cols > 0 && out_w > 0 && pitch_lines > 0;
+    const int f = ok ? s_screen_filter : 0;
+    const int u = ok ? s_upscale_filter : 0;
+    if (uF >= 0)  p_glUniform1i(uF, f);
+    if (uUp >= 0) p_glUniform1i(uUp, u);
+    if (!f && !u) return;
     if (uCols >= 0) p_glUniform1f(uCols, (float)pitch_cols);
     if (uXs >= 0)   p_glUniform1f(uXs, (float)out_w / (float)disp_cols);
 }
@@ -2873,10 +2880,12 @@ static void present_set_filter(GLint uF, GLint uCols, GLint uXs, int pitch_cols,
                          s_interp_uScanLines, s_interp_uScanScale,          \
                          (pitch), (disp), (oh))
 #define PRESENT_FILTER(pc, dc, ow, pl)                                      \
-    present_set_filter(s_present_uFilter, s_present_uFilterCols,            \
+    present_set_filter(s_present_uFilter, s_present_uUpscale,               \
+                       s_present_uFilterCols,                               \
                        s_present_uFilterXScale, (pc), (dc), (ow), (pl))
 #define INTERP_FILTER(pc, dc, ow, pl)                                       \
-    present_set_filter(s_interp_uFilter, s_interp_uFilterCols,              \
+    present_set_filter(s_interp_uFilter, s_interp_uUpscale,                 \
+                       s_interp_uFilterCols,                                \
                        s_interp_uFilterXScale, (pc), (dc), (ow), (pl))
 
 void gl_renderer_set_screen_filter(int mode) {
@@ -2884,6 +2893,11 @@ void gl_renderer_set_screen_filter(int mode) {
 }
 int gl_renderer_get_screen_filter(void) { return s_screen_filter; }
 int gl_renderer_screen_filter_count(void) { return GL_SCREEN_FILTER_COUNT; }
+void gl_renderer_set_upscale_filter(int mode) {
+    s_upscale_filter = (mode >= 0 && mode < GL_UPSCALE_FILTER_COUNT) ? mode : 0;
+}
+int gl_renderer_get_upscale_filter(void) { return s_upscale_filter; }
+int gl_renderer_upscale_filter_count(void) { return GL_UPSCALE_FILTER_COUNT; }
 
 /* Display aspect for the present letterbox. Default 4:3 (native). When a wide
  * aspect is configured the 4:3 frame is stretched into it — paired with the
@@ -3181,6 +3195,8 @@ int gl_renderer_init_context(SDL_Window *win) {
                 p_glGetUniformLocation(s_present_prog, "u_scanline_scale");
             s_present_uFilter =
                 p_glGetUniformLocation(s_present_prog, "u_filter");
+            s_present_uUpscale =
+                p_glGetUniformLocation(s_present_prog, "u_upscale");
             s_present_uFilterCols =
                 p_glGetUniformLocation(s_present_prog, "u_filter_cols");
             s_present_uFilterXScale =
@@ -3195,6 +3211,8 @@ int gl_renderer_init_context(SDL_Window *win) {
                 p_glGetUniformLocation(s_interp_prog, "u_scanline_scale");
             s_interp_uFilter =
                 p_glGetUniformLocation(s_interp_prog, "u_filter");
+            s_interp_uUpscale =
+                p_glGetUniformLocation(s_interp_prog, "u_upscale");
             s_interp_uFilterCols =
                 p_glGetUniformLocation(s_interp_prog, "u_filter_cols");
             s_interp_uFilterXScale =

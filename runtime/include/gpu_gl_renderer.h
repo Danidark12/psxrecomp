@@ -132,8 +132,13 @@ int  gl_renderer_get_scanlines(float *strength);
 /* Filtro de tela: 0 nenhum, 1 LCD, 2 LCD RGB, 3 CRT, 4 CRT suave. */
 void gl_renderer_set_screen_filter(int mode);
 int  gl_renderer_get_screen_filter(void);
-/* Quantos filtros de tela existem (0 = nenhum). */
+/* Quantos filtros de tela (máscaras) existem (0 = nenhum). */
 int  gl_renderer_screen_filter_count(void);
+/* Upscaler de pixel art, combinável com o filtro de tela e as scanlines:
+ * 0 nenhum, 1 Sharp Bilinear, 2 Scale2x, 3 Scale3x, 4 xBR. */
+void gl_renderer_set_upscale_filter(int mode);
+int  gl_renderer_get_upscale_filter(void);
+int  gl_renderer_upscale_filter_count(void);
 
 /* Select full native-wide mirror rendering instead of the centre-splice fast
  * path. Textured edge expansion needs the complete mirror surface. */
