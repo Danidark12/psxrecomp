@@ -328,6 +328,9 @@ static float         s_scanline_strength = 0.5f;
 static GLint         s_present_uScanline = -1, s_present_uScanStrength = -1;
 static GLint         s_present_uScanLines = -1, s_present_uScanScale = -1;
 /* Filtro de tela (LCD/CRT), independente das scanlines. 0 = nenhum. */
+/* 0 nenhum, 1 LCD, 2 LCD RGB, 3 CRT, 4 CRT suave, 5 pixels nítidos,
+ * 6 Scale2x, 7 Scale3x, 8 xBR, 9 pontos (ver PSX_UPSCALE_FUNC). */
+#define GL_SCREEN_FILTER_COUNT 10
 static int           s_screen_filter = 0;
 static GLint         s_present_uFilter = -1, s_present_uFilterCols = -1;
 static GLint         s_present_uFilterXScale = -1;
@@ -937,7 +940,7 @@ static const char *PRESENT_VS =
      *   3 CRT: máscara de abertura RGB + linhas de varredura suaves.        \
      *   4 CRT suave: só máscara leve + brilho, sem linhas marcadas. */     \
     "vec3 psx_filter(vec3 rgb, vec2 uv){\n" \
-    "  if (u_filter == 0) return rgb;\n" \
+    "  if (u_filter == 0 || u_filter >= 5) return rgb;\n" \
     "  float sx = max(u_filter_xscale, 0.0), sy = max(u_scanline_scale, 0.0);\n" \
     "  float gate = clamp(min(sx, sy) - 2.0, 0.0, 1.0);\n" \
     "  if (gate <= 0.0) return rgb;\n" \
@@ -965,6 +968,113 @@ static const char *PRESENT_VS =
     "    }\n" \
     "  }\n" \
     "  return mix(rgb, clamp(o, 0.0, 1.0), gate);\n" \
+    "}\n"
+/* Filtros de escala para pixel art (u_filter >= 5). Trabalham na grade de
+ * pixels do PS1 (u_filter_cols x u_scanline_lines pixels na textura inteira)
+ * e lêem os vizinhos no centro de cada pixel, então valem igual para a
+ * textura da CPU, para a VRAM em resolução interna maior e para a
+ * interpolação de quadros. Rodam no espaço da imagem original: a
+ * proporção 16:9/21:9 só estica o resultado depois.
+ *   5 PIXELS NITIDOS: pixels quadrados e do mesmo tamanho em qualquer
+ *     escala (bilinear só na borda de 1 pixel de saída).
+ *   6 SCALE2X / 7 SCALE3X: regras EPX/AdvMAME; arredondam as diagonais
+ *     mantendo cores e blocos de pixel.
+ *   8 XBR: regras do xBR nível 2 (Hyllian), bordas suaves com antialias.
+ *   9 PONTOS: cada pixel vira um ponto redondo (matriz de pontos). */
+#define PSX_UPSCALE_FUNC \
+    "vec3 psx_tap(sampler2D t, vec2 cell, vec2 grid, vec2 lo, vec2 hi){\n" \
+    "  return texture(t, clamp((cell + 0.5) / grid, lo, hi)).rgb;\n" \
+    "}\n" \
+    "bool psx_same(vec3 a, vec3 b){ return all(lessThan(abs(a - b), vec3(0.004))); }\n" \
+    "float psx_luma(vec3 c){ return dot(c, vec3(14.352, 28.176, 5.472)); }\n" \
+    "vec3 psx_upscale(sampler2D t, vec2 uv, vec2 lo, vec2 hi){\n" \
+    "  vec2 grid = vec2(max(u_filter_cols, 1.0), max(u_scanline_lines, 1.0));\n" \
+    "  vec2 sc = max(vec2(u_filter_xscale, u_scanline_scale), vec2(1.0));\n" \
+    "  vec2 g = uv * grid;\n" \
+    "  vec2 cell = floor(g);\n" \
+    "  vec2 fp = g - cell;\n" \
+    "  if (u_filter == 5) {\n" \
+    "    vec2 band = 0.5 - 0.5 / sc;\n" \
+    "    vec2 cd = fp - 0.5;\n" \
+    "    vec2 pos = cell + (cd - clamp(cd, -band, band)) * sc + 0.5 - 0.5;\n" \
+    "    vec2 i = floor(pos), w = pos - i;\n" \
+    "    vec3 a = psx_tap(t, i, grid, lo, hi), b = psx_tap(t, i + vec2(1.0, 0.0), grid, lo, hi);\n" \
+    "    vec3 c = psx_tap(t, i + vec2(0.0, 1.0), grid, lo, hi), d = psx_tap(t, i + vec2(1.0), grid, lo, hi);\n" \
+    "    return mix(mix(a, b, w.x), mix(c, d, w.x), w.y);\n" \
+    "  }\n" \
+    "  vec3 E = psx_tap(t, cell, grid, lo, hi);\n" \
+    "  if (u_filter == 9) {\n" \
+    "    float px = min(sc.x, sc.y);\n" \
+    "    float gate = clamp(px - 2.0, 0.0, 1.0);\n" \
+    "    float r = length(fp - 0.5) * 2.0;\n" \
+    "    float aa = 2.0 / max(px, 1.0);\n" \
+    "    float m = 1.0 - smoothstep(0.86 - aa, 0.86 + aa, r);\n" \
+    "    vec3 o = E * mix(0.38, 1.12, m);\n" \
+    "    return mix(E, clamp(o, 0.0, 1.0), gate);\n" \
+    "  }\n" \
+    "  vec3 A = psx_tap(t, cell + vec2(-1.0, -1.0), grid, lo, hi);\n" \
+    "  vec3 B = psx_tap(t, cell + vec2( 0.0, -1.0), grid, lo, hi);\n" \
+    "  vec3 C = psx_tap(t, cell + vec2( 1.0, -1.0), grid, lo, hi);\n" \
+    "  vec3 D = psx_tap(t, cell + vec2(-1.0,  0.0), grid, lo, hi);\n" \
+    "  vec3 F = psx_tap(t, cell + vec2( 1.0,  0.0), grid, lo, hi);\n" \
+    "  vec3 G = psx_tap(t, cell + vec2(-1.0,  1.0), grid, lo, hi);\n" \
+    "  vec3 H = psx_tap(t, cell + vec2( 0.0,  1.0), grid, lo, hi);\n" \
+    "  vec3 I = psx_tap(t, cell + vec2( 1.0,  1.0), grid, lo, hi);\n" \
+    "  if (u_filter == 6) {\n" \
+    "    vec3 th = fp.x < 0.5 ? D : F, oh = fp.x < 0.5 ? F : D;\n" \
+    "    vec3 tv = fp.y < 0.5 ? B : H, ov = fp.y < 0.5 ? H : B;\n" \
+    "    return (psx_same(th, tv) && !psx_same(tv, oh) && !psx_same(th, ov)) ? th : E;\n" \
+    "  }\n" \
+    "  if (u_filter == 7) {\n" \
+    "    bool db = psx_same(D, B), bf = psx_same(B, F), dh = psx_same(D, H), hf = psx_same(H, F);\n" \
+    "    bool nbf = !bf, ndh = !dh, ndb = !db, nhf = !hf;\n" \
+    "    int sx = int(min(floor(fp.x * 3.0), 2.0)), sy = int(min(floor(fp.y * 3.0), 2.0));\n" \
+    "    int k = sx + sy * 3;\n" \
+    "    if (k == 0) return (db && nbf && ndh) ? D : E;\n" \
+    "    if (k == 1) return ((db && nbf && ndh && !psx_same(E, C)) || (bf && ndb && nhf && !psx_same(E, A))) ? B : E;\n" \
+    "    if (k == 2) return (bf && ndb && nhf) ? F : E;\n" \
+    "    if (k == 3) return ((db && nbf && ndh && !psx_same(E, G)) || (dh && ndb && nhf && !psx_same(E, A))) ? D : E;\n" \
+    "    if (k == 4) return E;\n" \
+    "    if (k == 5) return ((bf && ndb && nhf && !psx_same(E, I)) || (hf && ndh && nbf && !psx_same(E, C))) ? F : E;\n" \
+    "    if (k == 6) return (dh && ndb && nhf) ? D : E;\n" \
+    "    if (k == 7) return ((dh && ndb && nhf && !psx_same(E, I)) || (hf && ndh && nbf && !psx_same(E, G))) ? H : E;\n" \
+    "    return (hf && ndh && nbf) ? F : E;\n" \
+    "  }\n" \
+    /* xBR: as quatro quinas, cada uma com a vizinhança espelhada para a  \
+     * quina de baixo/direita; fica a de maior cobertura. */              \
+    "  vec3 P[25]; float Y[25];\n" \
+    "  for (int j = -2; j <= 2; ++j) for (int i = -2; i <= 2; ++i) {\n" \
+    "    int k = (i + 2) + (j + 2) * 5;\n" \
+    "    if (abs(i) == 2 && abs(j) == 2) { P[k] = E; Y[k] = 0.0; continue; }\n" \
+    "    P[k] = psx_tap(t, cell + vec2(float(i), float(j)), grid, lo, hi);\n" \
+    "    Y[k] = psx_luma(P[k]);\n" \
+    "  }\n" \
+    "  float delta = 0.5 / min(sc.x, sc.y);\n" \
+    "  float best = 0.0; vec3 bestc = E;\n" \
+    "  for (int q = 0; q < 4; ++q) {\n" \
+    "    int sx = (q & 1) == 0 ? 1 : -1, sy = (q & 2) == 0 ? 1 : -1;\n" \
+    "    vec2 m = vec2(sx > 0 ? fp.x : 1.0 - fp.x, sy > 0 ? fp.y : 1.0 - fp.y);\n" \
+    "    #define XI(x, y) (((x) * sx + 2) + ((y) * sy + 2) * 5)\n" \
+    "    float e = Y[XI(0,0)], f = Y[XI(1,0)], h = Y[XI(0,1)], i9 = Y[XI(1,1)];\n" \
+    "    float b = Y[XI(0,-1)], c = Y[XI(1,-1)], d = Y[XI(-1,0)], g = Y[XI(-1,1)];\n" \
+    "    float f4 = Y[XI(2,0)], i4 = Y[XI(2,1)], h5 = Y[XI(0,2)], i5 = Y[XI(1,2)];\n" \
+    "    if (e == f || e == h) continue;\n" \
+    "    float wd1 = abs(e - c) + abs(e - g) + abs(i9 - h5) + abs(i9 - f4) + 4.0 * abs(h - f);\n" \
+    "    float wd2 = abs(h - d) + abs(h - i5) + abs(f - i4) + abs(f - b) + 4.0 * abs(e - i9);\n" \
+    "    bool lv1 = (abs(f - b) >= 15.0 && abs(h - d) >= 15.0) ||\n" \
+    "               (abs(e - i9) < 15.0 && abs(f - i4) >= 15.0 && abs(h - i5) >= 15.0) ||\n" \
+    "               abs(e - g) < 15.0 || abs(e - c) < 15.0;\n" \
+    "    if (!(wd1 < wd2) || !lv1) continue;\n" \
+    "    bool left = (2.0 * abs(f - g) <= abs(h - c)) && e != g && d != g;\n" \
+    "    bool up   = (abs(f - g) >= 2.0 * abs(h - c)) && e != c && b != c;\n" \
+    "    float cov = smoothstep(1.5 - delta, 1.5 + delta, m.x + m.y);\n" \
+    "    if (left) cov = max(cov, smoothstep(1.0 - delta, 1.0 + delta, m.y + 0.5 * m.x));\n" \
+    "    if (up)   cov = max(cov, smoothstep(1.0 - delta, 1.0 + delta, m.x + 0.5 * m.y));\n" \
+    "    vec3 col = abs(e - f) <= abs(e - h) ? P[XI(1,0)] : P[XI(0,1)];\n" \
+    "    #undef XI\n" \
+    "    if (cov > best) { best = cov; bestc = col; }\n" \
+    "  }\n" \
+    "  return mix(E, bestc, best);\n" \
     "}\n"
 static const char *PRESENT_FS =
     "#version 330\n"
@@ -1003,10 +1113,15 @@ static const char *PRESENT_FS =
     "  return r;\n"
     "}\n"
     PSX_SCANLINE_FUNC
+    PSX_UPSCALE_FUNC
     "void main(){\n"
     "  vec2 uv = v_uv;\n"
     "  vec4 c;\n"
-    "  if (u_sharp == 2) { c = bicubic(uv); }\n"
+    "  if (u_filter >= 5) {\n"
+    "    vec2 lo = min(u_uv_rect.xy, u_uv_rect.zw);\n"
+    "    vec2 hi = max(u_uv_rect.xy, u_uv_rect.zw);\n"
+    "    c = vec4(psx_upscale(u_tex, uv, lo, hi), texture(u_tex, uv).a);\n"
+    "  } else if (u_sharp == 2) { c = bicubic(uv); }\n"
     "  else {\n"
     "    if (u_sharp == 1) {\n"
     "      vec2 scale = max(u_sharp_scale, vec2(1.0));\n"
@@ -1032,8 +1147,13 @@ static const char *INTERP_FS =
     "uniform float u_alpha; uniform int u_blend_mode; out vec4 frag;\n"
     PSX_SCANLINE_UNIFORMS
     PSX_SCANLINE_FUNC
+    PSX_UPSCALE_FUNC
     "void main(){\n"
     "  vec4 prev=texture(u_prev,v_uv), curr=texture(u_curr,v_uv);\n"
+    "  if(u_filter>=5){\n"
+    "    prev.rgb=psx_upscale(u_prev,v_uv,vec2(0.0),vec2(1.0));\n"
+    "    curr.rgb=psx_upscale(u_curr,v_uv,vec2(0.0),vec2(1.0));\n"
+    "  }\n"
     "  float alpha=u_alpha;\n"
     "  if(u_blend_mode==1){\n"
     "    vec3 d=abs(prev.rgb-curr.rgb);\n"
@@ -2760,9 +2880,10 @@ static void present_set_filter(GLint uF, GLint uCols, GLint uXs, int pitch_cols,
                        s_interp_uFilterXScale, (pc), (dc), (ow), (pl))
 
 void gl_renderer_set_screen_filter(int mode) {
-    s_screen_filter = (mode >= 0 && mode <= 4) ? mode : 0;
+    s_screen_filter = (mode >= 0 && mode < GL_SCREEN_FILTER_COUNT) ? mode : 0;
 }
 int gl_renderer_get_screen_filter(void) { return s_screen_filter; }
+int gl_renderer_screen_filter_count(void) { return GL_SCREEN_FILTER_COUNT; }
 
 /* Display aspect for the present letterbox. Default 4:3 (native). When a wide
  * aspect is configured the 4:3 frame is stretched into it — paired with the

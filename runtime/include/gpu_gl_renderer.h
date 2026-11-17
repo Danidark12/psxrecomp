@@ -132,6 +132,8 @@ int  gl_renderer_get_scanlines(float *strength);
 /* Filtro de tela: 0 nenhum, 1 LCD, 2 LCD RGB, 3 CRT, 4 CRT suave. */
 void gl_renderer_set_screen_filter(int mode);
 int  gl_renderer_get_screen_filter(void);
+/* Quantos filtros de tela existem (0 = nenhum). */
+int  gl_renderer_screen_filter_count(void);
 
 /* Select full native-wide mirror rendering instead of the centre-splice fast
  * path. Textured edge expansion needs the complete mirror surface. */
