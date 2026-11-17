@@ -6689,8 +6689,8 @@ static void bezel_choice_save(void) {
                  g_bezel_off ? "off" : g_bezel_path.c_str());
     std::fclose(f);
 }
-/* Cena de exemplo do jogo (assets/frame_preview_sample.png: Lenneth num
- * ponto de save, 320x224) usada nas prévias de molduras e filtros. */
+/* Cena de exemplo do jogo (assets/frame_preview_sample.png: Lenneth nas
+ * colinas de Asgard Hill, 320x224) usada nas prévias de molduras e filtros. */
 static void frame_sample(const unsigned char **px, int *w, int *h) {
     static std::vector<unsigned char> sample;
     static int sw = 0, sh = 0, tried = 0;
@@ -6932,7 +6932,7 @@ static int ingame_opt_filter_preview(const unsigned char **rgba, int *w, int *h)
         g_filter_preview.clear();
         int ow = 0, oh = 0;
         unsigned char *img = recomp_filter_preview_render(
-            sample, sw, sh, 136, 122, 44, 38, 3, up, flt, scan,
+            sample, sw, sh, 132, 118, 46, 38, 3, up, flt, scan,
             g_video_scanline_strength, &ow, &oh);
         if (img) {
             g_filter_preview.assign(img, img + (size_t)ow * (size_t)oh * 4u);
