@@ -12456,6 +12456,16 @@ int main(int argc, char** argv) {
                     addresses.data(), expected.data(), (int)addresses.size());
             }
             {
+                std::vector<uint32_t> addresses, expected, edges;
+                for (const auto& site : gc.ws_cull_extent_sites) {
+                    addresses.push_back(site.address);
+                    expected.push_back(site.expected);
+                    edges.push_back(site.edge);
+                }
+                gpu_ws_set_extent_sites(addresses.data(), expected.data(),
+                                        edges.data(), (int)addresses.size());
+            }
+            {
                 std::vector<uint32_t> addresses, expected, thresholds;
                 std::vector<uint32_t> object_regs, x_regs, z_regs, y_regs;
                 std::vector<uint32_t> queue_guards;

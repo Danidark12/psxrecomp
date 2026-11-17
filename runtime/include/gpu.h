@@ -261,6 +261,12 @@ void gpu_ws_set_cull_keep_sites(const uint32_t *addresses,
                                 const uint32_t *results, int nsites);
 void gpu_ws_set_angle_sites(const uint32_t *addresses,
                             const uint32_t *expected, int nsites);
+void gpu_ws_set_extent_sites(const uint32_t *addresses, const uint32_t *expected,
+                             const uint32_t *edges, int nsites);
+uint32_t psx_ws_extent_widen(uint32_t vanilla, uint32_t edge);
+int psx_ws_extent_site(uint32_t pc, uint32_t instr, uint32_t *out);
+int psx_ws_extent_load_site(uint32_t pc, uint32_t instr, uint32_t loaded,
+                            uint32_t *out);
 void gpu_ws_set_aspect_cone(const uint32_t *addresses,
                             const uint32_t *expected,
                             const uint32_t *cosine_thresholds,

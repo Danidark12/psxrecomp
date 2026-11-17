@@ -1967,7 +1967,8 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
     {
         uint32_t widened = 0;
         uint32_t a = cpu->gpr[rs];
-        if (psx_ws_angle_site(pc, insn, &widened))
+        if (psx_ws_angle_site(pc, insn, &widened) ||
+            psx_ws_extent_site(pc, insn, &widened))
             cpu->gpr[rt] = widened;
         else
             cpu->gpr[rt] = a + (uint32_t)simm
@@ -1981,7 +1982,8 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
     {
         uint32_t widened = 0;
         uint32_t a = cpu->gpr[rs];
-        if (psx_ws_angle_site(pc, insn, &widened))
+        if (psx_ws_angle_site(pc, insn, &widened) ||
+            psx_ws_extent_site(pc, insn, &widened))
             cpu->gpr[rt] = widened;
         else
             cpu->gpr[rt] = a + (uint32_t)simm
@@ -2204,7 +2206,10 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
     case 0x21: { /* LH */
         uint32_t addr = cpu->gpr[rs] + (uint32_t)simm;
         if (addr & 1) return interp_exception(cpu, 4, addr, pc);  /* LoadAddressError */
+        uint32_t widened = 0;
         cpu->gpr[rt] = (uint32_t)(int32_t)(int16_t)psx_cyc_load_half(cpu, addr, rt, 1u << rs);
+        if (psx_ws_extent_load_site(pc, insn, cpu->gpr[rt], &widened))
+            cpu->gpr[rt] = widened;
         psx_pgxp_load(cpu, insn, addr, cpu->gpr[rt]);
         cpu->gpr[0] = 0;
         return 0;

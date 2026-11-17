@@ -108,6 +108,17 @@ struct WidescreenAngleSite {
     uint32_t expected = 0; // guarded ADDI/ADDIU with rs == zero
 };
 
+// Screen-space horizontal extent loaded with `addi[u] rt,zero,imm` (e.g. a
+// view rectangle's left edge and width in 320-wide guest pixels). While
+// widescreen reveals extra world the runtime moves the left edge out by the
+// per-side margin (edge 0) or grows the width by both margins (edge 1).
+// Full-word guarded; 4:3 keeps the vanilla immediate.
+struct WidescreenExtentSite {
+    uint32_t address = 0;
+    uint32_t expected = 0; // guarded ADDI/ADDIU with rs == zero
+    uint32_t edge = 0;     // 0 = left edge, 1 = width
+};
+
 // Aspect-aware horizontal participation cone. The exact compare sites are
 // full-word guarded because overlay variants can reuse a virtual address for
 // unrelated code. Registers are MIPS GPR indices captured at each comparison.
@@ -1168,6 +1179,10 @@ struct GameConfig {
     //   reveal pixels once before the new stage background is submitted.
     uint32_t ws_bg2d_init_func    = 0;
     uint32_t ws_bg2d_packet_cap       = 1000;
+    // [[widescreen.cull.extent]]: screen-space view extents (left edge /
+    // width) widened by the live per-side margin. Kept last so the positional
+    // GameConfig initializer in config_loader.cpp is unaffected.
+    std::vector<WidescreenExtentSite> ws_cull_extent_sites;
 };
 
 // UserSettings — the launcher-written, user-editable override layer.

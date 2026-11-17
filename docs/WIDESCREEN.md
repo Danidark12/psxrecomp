@@ -85,6 +85,22 @@ expected = "0x28A21C01"                # SLT/SLTU/SLTI/SLTIU only
 result   = 1                           # forced comparison result, 0 or 1
 ```
 
+`[[widescreen.cull.extent]]` widens a screen-space view rectangle that a game
+uses to pick what world geometry to submit (for example a terrain footprint
+built by unprojecting the corners of a 320-wide rect). Each site is either an
+`addi[u] rt,zero,imm` that builds the value or an `lh` that reads it back;
+`edge = "left"` moves the value out by the per-side widescreen margin and
+`edge = "width"` grows it by both margins. Guest RAM is never rewritten, so
+saves and true 4:3 are unaffected. These sites are interpreter-only (dirty-RAM
+overlay code) and need no regen:
+
+```toml
+[[widescreen.cull.extent]]
+address  = "0x80039950"
+expected = "0x860301E8"                # lh v1,0x1E8(s0)
+edge     = "width"                     # "left" or "width"
+```
+
 When `adaptive_view` is enabled by the game, the launcher's **Aspect ratio**
 selector gains an **Adaptive** entry. The previously selected fixed aspect
 still determines the initial window shape. Once the game window exists,

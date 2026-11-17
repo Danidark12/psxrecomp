@@ -130,6 +130,20 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
         h.u32(site.expected);
     }
 
+    std::vector<WidescreenExtentSite> extent_sites = c.ws_cull_extent_sites;
+    std::sort(extent_sites.begin(), extent_sites.end(),
+              [](const auto& a, const auto& b) {
+                  if (a.address != b.address) return a.address < b.address;
+                  return a.expected < b.expected;
+              });
+    h.tag("cull_extent");
+    h.u32((uint32_t)extent_sites.size());
+    for (const auto& site : extent_sites) {
+        h.u32(site.address);
+        h.u32(site.expected);
+        h.u32(site.edge);
+    }
+
     std::vector<WidescreenAspectConeSite> cone_sites =
         c.ws_aspect_cone.sites;
     std::sort(cone_sites.begin(), cone_sites.end(),
@@ -1683,6 +1697,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     std::vector<uint32_t> ws_cull_branch_keep_sites;
     std::vector<WidescreenCullKeepSite> ws_cull_keep_sites;
     std::vector<WidescreenAngleSite> ws_cull_angle_sites;
+    std::vector<WidescreenExtentSite> ws_cull_extent_sites;
     WidescreenAspectConeConfig ws_aspect_cone;
     int ws_cull_guard_pixels = 0;
     int ws_cull_activation_guard_pixels = 0;
@@ -1779,6 +1794,46 @@ GameConfig load_game_config(const fs::path& config_path_in) {
                             "{}: duplicate cull-angle address 0x{:08X}",
                             config_path.string(), site.address));
                     ws_cull_angle_sites.push_back(site);
+                }
+            }
+            if (cull.contains("extent")) {
+                std::set<uint32_t> seen;
+                for (const auto& item :
+                     toml::find<toml::array>(cull, "extent")) {
+                    WidescreenExtentSite site;
+                    site.address = parse_hex(
+                        toml::find<std::string>(item, "address"),
+                        "widescreen.cull.extent.address");
+                    site.expected = parse_hex(
+                        toml::find<std::string>(item, "expected"),
+                        "widescreen.cull.extent.expected");
+                    const std::string edge =
+                        toml::find<std::string>(item, "edge");
+                    if (edge == "left") site.edge = 0;
+                    else if (edge == "width") site.edge = 1;
+                    else
+                        throw std::runtime_error(fmt::format(
+                            "{}: [[widescreen.cull.extent]] edge must be "
+                            "\"left\" or \"width\"",
+                            config_path.string()));
+                    const uint32_t op = site.expected >> 26;
+                    const uint32_t rs = (site.expected >> 21) & 31u;
+                    if (!(((op == 0x08u || op == 0x09u) && rs == 0u) ||
+                          op == 0x21u))
+                        throw std::runtime_error(fmt::format(
+                            "{}: [[widescreen.cull.extent]] expected must be "
+                            "ADDI/ADDIU rt,zero,imm or LH rt,off(base)",
+                            config_path.string()));
+                    if ((site.address & 3u) != 0)
+                        throw std::runtime_error(fmt::format(
+                            "{}: cull-extent address 0x{:08X} is not "
+                            "instruction-aligned",
+                            config_path.string(), site.address));
+                    if (!seen.insert(site.address & 0x1FFFFFFFu).second)
+                        throw std::runtime_error(fmt::format(
+                            "{}: duplicate cull-extent address 0x{:08X}",
+                            config_path.string(), site.address));
+                    ws_cull_extent_sites.push_back(site);
                 }
             }
             if (cull.contains("aspect_cone")) {
@@ -2197,6 +2252,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_bg2d_layer_struct_stride*/ ws_bg2d_layer_struct_stride,
         /*ws_bg2d_init_func*/     ws_bg2d_init_func,
         /*ws_bg2d_packet_cap*/    ws_bg2d_packet_cap,
+        /*ws_cull_extent_sites*/  ws_cull_extent_sites,
     };
 }
 

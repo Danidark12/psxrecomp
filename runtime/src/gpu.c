@@ -735,6 +735,65 @@ int psx_ws_angle_site(uint32_t pc, uint32_t instr, uint32_t *out) {
     return 0;
 }
 
+/* [[widescreen.cull.extent]]: screen-space view extents, either built with
+ * `addi[u] rt,zero,imm` or read back with `lh` (the loaded halfword is the
+ * vanilla value; RAM itself is never rewritten). While widescreen reveals extra world the left edge
+ * moves out by the per-side margin and the width grows by both margins; at
+ * true 4:3 the margin is 0 and the vanilla immediate is returned. */
+typedef struct {
+    uint32_t address;
+    uint32_t expected;
+    uint32_t edge;   /* 0 = left edge, 1 = width */
+} WsExtentSite;
+static WsExtentSite ws_extent_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static int ws_extent_n = 0;
+static uint64_t ws_extent_calls = 0;
+
+void gpu_ws_set_extent_sites(const uint32_t *addresses, const uint32_t *expected,
+                             const uint32_t *edges, int nsites) {
+    if (nsites < 0) nsites = 0;
+    if (nsites > WS_EXPLICIT_CULL_SITES_MAX) nsites = WS_EXPLICIT_CULL_SITES_MAX;
+    ws_extent_n = nsites;
+    for (int i = 0; i < nsites; i++) {
+        ws_extent_sites[i].address = addresses[i] & 0x1FFFFFFFu;
+        ws_extent_sites[i].expected = expected[i];
+        ws_extent_sites[i].edge = edges[i] ? 1u : 0u;
+    }
+    ws_extent_calls = 0;
+}
+
+uint32_t psx_ws_extent_widen(uint32_t vanilla, uint32_t edge) {
+    ws_extent_calls++;
+    const int margin = psx_ws_x_margin();
+    if (margin <= 0) return vanilla;
+    return edge ? vanilla + (uint32_t)(2 * margin) : vanilla - (uint32_t)margin;
+}
+
+int psx_ws_extent_site(uint32_t pc, uint32_t instr, uint32_t *out) {
+    const uint32_t phys = pc & 0x1FFFFFFFu;
+    for (int i = 0; i < ws_extent_n; i++) {
+        const WsExtentSite *site = &ws_extent_sites[i];
+        if (site->address != phys || site->expected != instr) continue;
+        if (out)
+            *out = psx_ws_extent_widen(
+                (uint32_t)(int32_t)(int16_t)(instr & 0xFFFFu), site->edge);
+        return 1;
+    }
+    return 0;
+}
+
+int psx_ws_extent_load_site(uint32_t pc, uint32_t instr, uint32_t loaded,
+                            uint32_t *out) {
+    const uint32_t phys = pc & 0x1FFFFFFFu;
+    for (int i = 0; i < ws_extent_n; i++) {
+        const WsExtentSite *site = &ws_extent_sites[i];
+        if (site->address != phys || site->expected != instr) continue;
+        if (out) *out = psx_ws_extent_widen(loaded, site->edge);
+        return 1;
+    }
+    return 0;
+}
+
 typedef struct {
     uint32_t address;
     uint32_t expected;
