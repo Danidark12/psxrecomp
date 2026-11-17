@@ -24,6 +24,9 @@
 #include "psx_rewind.h"
 #include "psx_savestate_menu.h"
 #include "psx_cheats.h"
+#if defined(RECOMP_LAUNCHER)
+#include "recomp_bezel_preview.h"
+#endif
 #include "host_osd.h"
 #include "host_keymap.h"
 #include "png_write.h"       /* png_write_rgb — present_shot readback */
@@ -6668,10 +6671,68 @@ static void bezel_choice_save(void) {
                  g_bezel_off ? "off" : g_bezel_path.c_str());
     std::fclose(f);
 }
+/* Miniatura da moldura atual para o menu F4: a moldura com uma cena de
+ * exemplo do jogo no meio (assets/frame_preview_sample.png, opcional). */
+static std::vector<unsigned char> g_bezel_preview;
+static int g_bezel_preview_w = 0, g_bezel_preview_h = 0;
+static void bezel_preview_build(const unsigned char *rgba, int w, int h) {
+    g_bezel_preview.clear();
+    g_bezel_preview_w = g_bezel_preview_h = 0;
+    if (!rgba) return;
+    static std::vector<unsigned char> sample;
+    static int sw = 0, sh = 0, tried = 0;
+    if (!tried) {
+        tried = 1;
+        const std::filesystem::path sp =
+            exe_dir_from_argv(nullptr) / "assets" / "frame_preview_sample.png";
+        if (FILE *f = bezel_fopen(sp, "rb")) {
+            std::vector<unsigned char> file;
+            std::fseek(f, 0, SEEK_END);
+            const long len = std::ftell(f);
+            std::fseek(f, 0, SEEK_SET);
+            if (len > 0) {
+                file.resize((size_t)len);
+                if (std::fread(file.data(), 1, file.size(), f) != file.size()) file.clear();
+            }
+            std::fclose(f);
+            int c = 0;
+            unsigned char *px = file.empty() ? nullptr
+                : stbi_load_from_memory(file.data(), (int)file.size(), &sw, &sh, &c, 4);
+            if (px) {
+                sample.assign(px, px + (size_t)sw * (size_t)sh * 4u);
+                stbi_image_free(px);
+            }
+        }
+    }
+#if defined(RECOMP_LAUNCHER)
+    int ow = 0, oh = 0;
+    unsigned char *out = recomp_bezel_preview_compose(
+        rgba, w, h, sample.empty() ? nullptr : sample.data(), sw, sh, 320, 160, &ow, &oh);
+    if (!out) return;
+    g_bezel_preview.assign(out, out + (size_t)ow * (size_t)oh * 4u);
+    g_bezel_preview_w = ow;
+    g_bezel_preview_h = oh;
+    recomp_bezel_preview_free(out);
+#else
+    (void)w; (void)h;
+#endif
+}
+static int ingame_opt_bezel_preview(const unsigned char **rgba, int *w, int *h) {
+    if (!g_bezel_mod_on || !g_gl_active || g_bezel_off || g_bezel_preview.empty()) return 0;
+    *rgba = g_bezel_preview.data();
+    *w = g_bezel_preview_w;
+    *h = g_bezel_preview_h;
+    return 1;
+}
+
 /* Carrega a imagem atual no renderer OpenGL (ou tira a moldura). */
 static bool bezel_apply_current(void) {
     if (!g_gl_active) return false;
-    if (g_bezel_off || g_bezel_path.empty()) { gl_renderer_set_bezel(nullptr, 0, 0); return true; }
+    if (g_bezel_off || g_bezel_path.empty()) {
+        gl_renderer_set_bezel(nullptr, 0, 0);
+        bezel_preview_build(nullptr, 0, 0);
+        return true;
+    }
     std::vector<unsigned char> file;
     if (FILE *bf = bezel_fopen(std::filesystem::path(g_bezel_path), "rb")) {
         std::fseek(bf, 0, SEEK_END);
@@ -6689,9 +6750,11 @@ static bool bezel_apply_current(void) {
     if (!px) {
         std::fprintf(stdout, "psxrecomp: bezel artwork not loaded: %s\n", g_bezel_path.c_str());
         gl_renderer_set_bezel(nullptr, 0, 0);
+        bezel_preview_build(nullptr, 0, 0);
         return false;
     }
     const int uploaded = gl_renderer_set_bezel(px, bw, bh);
+    bezel_preview_build(px, bw, bh);
     stbi_image_free(px);
     std::fprintf(stdout, "psxrecomp: bezel artwork %dx%d from %s%s\n", bw, bh, g_bezel_path.c_str(),
                  uploaded ? "" : " (GL raster unavailable: not shown)");
@@ -6850,7 +6913,7 @@ static const PsxMenuOption kIngameOptions[] = {
       "CYCLES THE FRAME (BEZEL ARTWORK MOD) THROUGH THE .PNG/.JPG IMAGES IN THE GAME FOLDER AND THE MOLDURAS FOLDER (PUT YOURS THERE), THEN OFF. SHOWS IN THE SIDE BARS (E.G. 4:3 ON A 16:9 MONITOR).",
       "MARCO",
       "CAMBIA EL MARCO (MOD BEZEL ARTWORK) ENTRE LAS IMAGENES .PNG/.JPG DE LA CARPETA DEL JUEGO Y DE LA CARPETA MOLDURAS (PON LAS TUYAS ALLI) Y AL FINAL LO DESACTIVA. SE VE EN LOS BORDES (EJ.: 4:3 EN MONITOR 16:9).",
-      ingame_opt_bezel_value, ingame_opt_bezel_activate },
+      ingame_opt_bezel_value, ingame_opt_bezel_activate, ingame_opt_bezel_preview },
     { "SCANLINES", "SCANLINES",
       "LINHAS DE VARREDURA PROPRIAS DO JOGO (A MESMA OPCAO DO LAUNCHER E DO F6). SEPARADAS DO FILTRO DE TELA: DA PARA USAR AS DUAS JUNTAS.",
       "THE GAME'S OWN SCANLINES (SAME AS THE LAUNCHER OPTION AND F6). SEPARATE FROM THE SCREEN FILTER: BOTH CAN BE USED TOGETHER.",

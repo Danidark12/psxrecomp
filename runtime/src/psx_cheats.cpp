@@ -398,11 +398,42 @@ static void rasterize(void) {
             draw_text(52, y + 7, recomp_cheat_name(c, lang), fg, 1, 68);
         }
         /* descrição do selecionado */
-        fill_rect(0, 352, CM_W, 58, 0xFF141822u);
-        if (s_sel < s_nopt) {
+        const unsigned char* pv = nullptr;
+        int pvw = 0, pvh = 0;
+        if (s_sel < s_nopt && s_opts[s_sel].preview &&
+            (!s_opts[s_sel].preview(&pv, &pvw, &pvh) || !pv || pvw <= 0 || pvh <= 0))
+            pv = nullptr;
+        if (pv) {
+            /* Miniatura: usa o espaço livre abaixo das linhas + a área da
+             * descrição; texto à esquerda, imagem à direita. */
+            const int shown = total < CM_VISIBLE ? total : CM_VISIBLE;
+            int top = CM_ROWS_Y + shown * CM_ROW_H;
+            if (top > 352) top = 352;
+            const int area_h = 408 - top;
+            fill_rect(0, top, CM_W, 410 - top, 0xFF141822u);
+            int th = area_h - 10, tw = pvw * th / pvh;
+            if (tw > 300) { tw = 300; th = pvh * tw / pvw; }
+            const int tx = 616 - tw, ty = top + (area_h - th) / 2;
+            for (int y = 0; y < th; ++y) {
+                const int sy = y * pvh / th;
+                for (int x = 0; x < tw; ++x) {
+                    const unsigned char* q = pv + ((size_t)sy * (size_t)pvw +
+                                                   (size_t)(x * pvw / tw)) * 4u;
+                    s_panel[(ty + y) * CM_W + tx + x] =
+                        0xFF000000u | ((uint32_t)q[0] << 16) | ((uint32_t)q[1] << 8) | q[2];
+                }
+            }
+            stroke_rect(tx - 1, ty - 1, tw + 2, th + 2, 0xFF303746u);
+            const PsxMenuOption* o = &s_opts[s_sel];
+            const int cols = (tx - 16 - 24) / 8;
+            draw_wrapped(24, top + 6, tr(lang, o->note_en, o->note_pt, o->note_es),
+                         0xFFB8BDC8u, cols, (area_h - 6) / 12);
+        } else if (s_sel < s_nopt) {
+            fill_rect(0, 352, CM_W, 58, 0xFF141822u);
             const PsxMenuOption* o = &s_opts[s_sel];
             draw_wrapped(24, 358, tr(lang, o->note_en, o->note_pt, o->note_es), 0xFFB8BDC8u, 74, 4);
         } else {
+            fill_rect(0, 352, CM_W, 58, 0xFF141822u);
             const RecompCheat* c = &s_list.cheats[s_sel - s_nopt];
             int used = 0;
             if (!c->supported)

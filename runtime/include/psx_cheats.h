@@ -23,6 +23,9 @@ typedef struct PsxMenuOption {
     const char *name_es, *note_es;
     void (*value)(char *out, int cap, int lang); /* valor atual; lang 0=en 1=pt 2=es */
     void (*activate)(char *msg, int cap);        /* X/Enter: troca o valor */
+    /* Opcional: miniatura RGBA8 mostrada quando a linha está selecionada
+     * (ex.: a moldura atual). Retorna 0 quando não há o que mostrar. */
+    int (*preview)(const unsigned char **rgba, int *w, int *h);
 } PsxMenuOption;
 void psx_cheats_menu_set_options(const PsxMenuOption *opts, int count);
 /* 0 = menu de cheats, 1 = menu de opções (mesma tela, listas separadas). */
