@@ -6925,15 +6925,16 @@ static int ingame_opt_filter_preview(const unsigned char **rgba, int *w, int *h)
     const int up = gl_renderer_get_upscale_filter();
     const int flt = gl_renderer_get_screen_filter();
     const int scan = g_video_scanlines ? 1 : 0;
-    const int key = up * 100000 + flt * 10000 + scan * 1000 +
+    const int smooth = (g_video_texfilter ? 1 : 0) + (g_video_aa ? 1 : 0);
+    const int key = smooth * 1000000 + up * 100000 + flt * 10000 + scan * 1000 +
                     (int)(g_video_scanline_strength * 100.0f);
     if (key != g_filter_preview_key) {
         g_filter_preview_key = key;
         g_filter_preview.clear();
         int ow = 0, oh = 0;
-        unsigned char *img = recomp_filter_preview_render(
+        unsigned char *img = recomp_filter_preview_render_ex(
             sample, sw, sh, 132, 118, 46, 38, 3, up, flt, scan,
-            g_video_scanline_strength, &ow, &oh);
+            g_video_scanline_strength, smooth, &ow, &oh);
         if (img) {
             g_filter_preview.assign(img, img + (size_t)ow * (size_t)oh * 4u);
             g_filter_preview_w = ow;
@@ -6964,13 +6965,13 @@ static const PsxMenuOption kIngameOptions[] = {
       "NEAREST: SHARP PIXELS LIKE THE PS1. BILINEAR: SMOOTHED TEXTURES (OPENGL ONLY).",
       "FILTRO DE TEXTURAS",
       "NEAREST: PIXELES NITIDOS COMO EN PS1. BILINEAR: TEXTURAS SUAVIZADAS (SOLO OPENGL).",
-      ingame_opt_texfilter_value, ingame_opt_texfilter_activate },
+      ingame_opt_texfilter_value, ingame_opt_texfilter_activate, ingame_opt_filter_preview },
     { "SUAVIZAR A IMAGEM NA TELA", "SCREEN SMOOTHING",
       "LIGADO: A IMAGEM FINAL E AMPLIADA COM FILTRO LINEAR. DESLIGADO: AMPLIADA SEM FILTRO (PIXELS QUADRADOS).",
       "ON: THE FINAL PICTURE IS SCALED WITH A LINEAR FILTER. OFF: SCALED WITHOUT FILTERING (SQUARE PIXELS).",
       "SUAVIZAR LA IMAGEN",
       "ACTIVADO: LA IMAGEN FINAL SE AMPLIA CON FILTRO LINEAL. DESACTIVADO: SE AMPLIA SIN FILTRO (PIXELES CUADRADOS).",
-      ingame_opt_smooth_value, ingame_opt_smooth_activate },
+      ingame_opt_smooth_value, ingame_opt_smooth_activate, ingame_opt_filter_preview },
     { "UPSCALER", "UPSCALER",
       "SUAVIZA A PIXEL ART ANTES DO FILTRO DE TELA. SHARP BILINEAR: PIXELS LIMPOS E DO MESMO TAMANHO. SCALE2X/SCALE3X: ARREDONDAM AS DIAGONAIS MANTENDO O VISUAL DE PIXEL. XBR: BORDAS SUAVES, TIPO DESENHO. COMBINA COM O FILTRO DE TELA E AS SCANLINES.",
       "SMOOTHS THE PIXEL ART BEFORE THE SCREEN FILTER. SHARP BILINEAR: CLEAN PIXELS, ALL THE SAME SIZE. SCALE2X/SCALE3X: ROUND OFF DIAGONALS AND KEEP THE PIXEL LOOK. XBR: SMOOTH, HAND-DRAWN EDGES. COMBINES WITH THE SCREEN FILTER AND SCANLINES.",
