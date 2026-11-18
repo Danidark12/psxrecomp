@@ -6917,15 +6917,15 @@ static std::vector<unsigned char> g_filter_preview;
 static int g_filter_preview_key = -1, g_filter_preview_w = 0, g_filter_preview_h = 0;
 static int ingame_opt_filter_preview(const unsigned char **rgba, int *w, int *h) {
 #if defined(RECOMP_LAUNCHER)
-    if (!g_gl_active) return 0;
     const unsigned char *sample = nullptr;
     int sw = 0, sh = 0;
     frame_sample(&sample, &sw, &sh);
     if (!sample) return 0;
-    const int up = gl_renderer_get_upscale_filter();
-    const int flt = gl_renderer_get_screen_filter();
-    const int scan = g_video_scanlines ? 1 : 0;
-    const int smooth = (g_video_texfilter ? 1 : 0) + (g_video_aa ? 1 : 0);
+    /* No Software só a suavização da tela vale; o resto é do OpenGL. */
+    const int up = g_gl_active ? gl_renderer_get_upscale_filter() : 0;
+    const int flt = g_gl_active ? gl_renderer_get_screen_filter() : 0;
+    const int scan = (g_gl_active && g_video_scanlines) ? 1 : 0;
+    const int smooth = ((g_gl_active && g_video_texfilter) ? 1 : 0) + (g_video_aa ? 1 : 0);
     const int key = smooth * 1000000 + up * 100000 + flt * 10000 + scan * 1000 +
                     (int)(g_video_scanline_strength * 100.0f);
     if (key != g_filter_preview_key) {
