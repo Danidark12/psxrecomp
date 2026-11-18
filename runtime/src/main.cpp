@@ -27,6 +27,7 @@
 #if defined(RECOMP_LAUNCHER)
 #include "recomp_bezel_preview.h"
 #include "recomp_filter_preview.h"
+#include "color_lut.h"
 #endif
 #include "host_osd.h"
 #include "host_keymap.h"
@@ -6911,6 +6912,29 @@ static void ingame_opt_launcher_activate(char *msg, int cap) {
     g_ingame_launcher_requested = 1;
 }
 
+/* Modelo de tela (cores de TV) para as prévias: aplica a mesma tabela de
+ * cores do scanout do Software num buffer RGBA8 (a amostra é RGB555 do PS1
+ * ampliado para 8 bits, então o >>3 recupera o valor exato). */
+#if defined(RECOMP_LAUNCHER)
+static void preview_color_hook(int kind, unsigned char *rgba, int pixels) {
+    static ColorLut *luts[4] = { nullptr, nullptr, nullptr, nullptr };
+    if (kind <= 0 || kind > 3 || !rgba) return;
+    if (!luts[kind]) {
+        ColorSettings cs;
+        cs.screen = (ScreenKind)kind;
+        cs.darken = -1.0;
+        cs.target = DISPLAY_SRGB;
+        luts[kind] = color_lut_create(&cs);
+        if (!luts[kind]) return;
+    }
+    for (int i = 0; i < pixels; ++i) {
+        unsigned char *p = rgba + (size_t)i * 4u;
+        const uint16_t c = (uint16_t)((p[0] >> 3) | ((p[1] >> 3) << 5) | ((p[2] >> 3) << 10));
+        color_lut_map555(luts[kind], c, &p[0], &p[1], &p[2]);
+    }
+}
+#endif
+
 /* Prévia dos filtros no menu F4 (linhas Upscaler, Filtro de tela e
  * Scanlines): a combinação atual num recorte da cena de exemplo, em 3x. */
 static std::vector<unsigned char> g_filter_preview;
@@ -6928,13 +6952,17 @@ static int ingame_opt_filter_preview(const unsigned char **rgba, int *w, int *h)
     const int smooth = ((g_gl_active && g_video_texfilter) ? 1 : 0) + (g_video_aa ? 1 : 0);
     const int key = smooth * 1000000 + up * 100000 + flt * 10000 + scan * 1000 +
                     (int)(g_video_scanline_strength * 100.0f);
-    if (key != g_filter_preview_key) {
-        g_filter_preview_key = key;
+    const int kind = g_gl_active ? 0 : g_video_screen;
+    if (key * 4 + kind != g_filter_preview_key) {
+        g_filter_preview_key = key * 4 + kind;
         g_filter_preview.clear();
+        recomp_filter_preview_set_color_hook(preview_color_hook);
+        unsigned char *colored = recomp_filter_preview_colorize(sample, sw, sh, kind);
         int ow = 0, oh = 0;
         unsigned char *img = recomp_filter_preview_render_ex(
-            sample, sw, sh, 132, 118, 46, 38, 3, up, flt, scan,
+            colored ? colored : sample, sw, sh, 132, 118, 46, 38, 3, up, flt, scan,
             g_video_scanline_strength, smooth, &ow, &oh);
+        if (colored) recomp_filter_preview_free(colored);
         if (img) {
             g_filter_preview.assign(img, img + (size_t)ow * (size_t)oh * 4u);
             g_filter_preview_w = ow;
@@ -6951,6 +6979,24 @@ static int ingame_opt_filter_preview(const unsigned char **rgba, int *w, int *h)
     (void)rgba; (void)w; (void)h;
     return 0;
 #endif
+}
+
+static void ingame_opt_screen_value(char *out, int cap, int lang) {
+    static const char *k[4] = { "RAW", "CRT", "COMPOSITE", "TRINITRON" };
+    static const char *kp[4] = { "RAW", "CRT", "COMPOSTO", "TRINITRON" };
+    static const char *ke[4] = { "RAW", "CRT", "COMPUESTO", "TRINITRON" };
+    const int i = (g_video_screen >= 0 && g_video_screen < 4) ? g_video_screen : 0;
+    if (g_gl_active) {
+        std::snprintf(out, cap, "%s", ingame_tr(lang, "SOFTWARE ONLY", "SO NO SOFTWARE", "SOLO SOFTWARE"));
+        return;
+    }
+    std::snprintf(out, cap, "%s", lang == 1 ? kp[i] : lang == 2 ? ke[i] : k[i]);
+}
+static void ingame_opt_screen_activate(char *msg, int cap) {
+    g_video_screen = (g_video_screen + 1) % 4;
+    gpu_set_screen_kind(g_video_screen);
+    ingame_options_persist();
+    std::snprintf(msg, cap, "Screen model: %d", g_video_screen);
 }
 
 static const PsxMenuOption kIngameOptions[] = {
@@ -6972,6 +7018,12 @@ static const PsxMenuOption kIngameOptions[] = {
       "SUAVIZAR LA IMAGEN",
       "ACTIVADO: LA IMAGEN FINAL SE AMPLIA CON FILTRO LINEAL. DESACTIVADO: SE AMPLIA SIN FILTRO (PIXELES CUADRADOS).",
       ingame_opt_smooth_value, ingame_opt_smooth_activate, ingame_opt_filter_preview },
+    { "MODELO DE TELA", "SCREEN MODEL",
+      "CORES DE UMA TV DA EPOCA. RAW: AS CORES DO PROPRIO PS1. CRT: TV DE TUBO. COMPOSTO: TV DE TUBO PELO CABO AMARELO, MAIS SUAVE. TRINITRON: CORES LIMPAS E PRETOS PROFUNDOS. SO NO RENDERIZADOR SOFTWARE.",
+      "COLOURS OF A TV OF THE ERA. RAW: THE PS1'S OWN COLOURS. CRT: TUBE TV. COMPOSITE: TUBE TV OVER THE YELLOW CABLE, SOFTER. TRINITRON: CLEAN COLOURS AND DEEP BLACKS. SOFTWARE RENDERER ONLY.",
+      "MODELO DE PANTALLA",
+      "COLORES DE UNA TV DE LA EPOCA. RAW: LOS COLORES DEL PROPIO PS1. CRT: TV DE TUBO. COMPUESTO: TV DE TUBO POR CABLE AMARILLO, MAS SUAVE. TRINITRON: COLORES LIMPIOS Y NEGROS PROFUNDOS. SOLO RENDERIZADOR SOFTWARE.",
+      ingame_opt_screen_value, ingame_opt_screen_activate, ingame_opt_filter_preview },
     { "UPSCALER", "UPSCALER",
       "SUAVIZA A PIXEL ART ANTES DO FILTRO DE TELA. SHARP BILINEAR: PIXELS LIMPOS E DO MESMO TAMANHO. SCALE2X/SCALE3X: ARREDONDAM AS DIAGONAIS MANTENDO O VISUAL DE PIXEL. XBR: BORDAS SUAVES, TIPO DESENHO. COMBINA COM O FILTRO DE TELA E AS SCANLINES.",
       "SMOOTHS THE PIXEL ART BEFORE THE SCREEN FILTER. SHARP BILINEAR: CLEAN PIXELS, ALL THE SAME SIZE. SCALE2X/SCALE3X: ROUND OFF DIAGONALS AND KEEP THE PIXEL LOOK. XBR: SMOOTH, HAND-DRAWN EDGES. COMBINES WITH THE SCREEN FILTER AND SCANLINES.",
@@ -12075,12 +12127,17 @@ static void ingame_options_persist(void) {
     us.has_fast_forward_speed = true;
     us.scanlines = g_video_scanlines;
     us.has_scanlines = true;
+    us.screen_kind = g_video_screen;
+    us.has_screen_kind = true;
     PSXRecompV4::save_user_settings(g_lnch_settings_path, us);
 }
 #endif
 
 int main(int argc, char** argv) {
     /* Force line-buffered output so messages appear even if killed. */
+#if defined(RECOMP_LAUNCHER)
+    recomp_filter_preview_set_color_hook(preview_color_hook);
+#endif
     std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);
     std::setvbuf(stderr, nullptr, _IOLBF, BUFSIZ);
     std::fprintf(stderr, "psxrecomp: main() entered\n");
@@ -16036,8 +16093,8 @@ soft_return_lobby:
             if (ls.scanline_strength_pct >= 0)
                 g_video_scanline_strength = ls.scanline_strength_pct / 100.0f;
             gl_renderer_set_screen_filter(psx_screen_filter_load());
-    gl_renderer_set_upscale_filter(psx_upscale_filter_load());
-    gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
+            gl_renderer_set_upscale_filter(psx_upscale_filter_load());
+            gl_renderer_set_scanlines(g_video_scanlines ? 1 : 0,
                                       g_video_scanline_strength);
 #endif
             /* Load acceleration and FMV skipping are mod-owned on PSX, and the
